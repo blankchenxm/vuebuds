@@ -4,7 +4,7 @@
   python viewer.py --rtt --reset   # also capture firmware RTT logs (from boot) into the same session log
   python viewer.py --duration 30 --snapshot shot.png   # auto-quit and save the last rendered view
 
-Keys: q / Esc to quit.
+Keys: Space saves the current frame to captures/, q / Esc quits.
 """
 import argparse
 import asyncio
@@ -184,6 +184,16 @@ def draw_overlay(canvas: np.ndarray, lines: list[str]):
         y += gap
 
 
+def save_frame(frame: protocol.Frame, out_dir: pathlib.Path) -> pathlib.Path:
+    """Save the frame at native resolution, without the overlay."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = f"{datetime.datetime.now():%Y%m%d-%H%M%S-%f}"[:-3]
+    path = out_dir / f"frame-{stamp}.png"
+    img = np.frombuffer(frame.pixels, np.uint8).reshape(frame.height, frame.width)
+    cv2.imwrite(str(path), img)
+    return path
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", default=protocol.DEVICE_NAME)
@@ -206,6 +216,7 @@ def main():
     w0, h0 = protocol.SIZE_HIGH_RES
     canvas = np.zeros((h0 * args.scale, w0 * args.scale, 3), np.uint8)
     last_frame: protocol.Frame | None = None
+    saved_msg, saved_until = "", 0.0
     cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
     t_end = time.monotonic() + args.duration if args.duration else None
 
@@ -220,10 +231,13 @@ def main():
                 img = cv2.resize(img, None, fx=args.scale, fy=args.scale, interpolation=cv2.INTER_NEAREST)
                 canvas = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
                 stalled = fps.seconds_since_last() > 5
-                draw_overlay(canvas, [
+                lines = [
                     f"FPS {fps.fps():.2f}" + (" (stalled)" if stalled else ""),
                     f"{last_frame.width}x{last_frame.height} {len(last_frame.pixels)} B",
-                ])
+                ]
+                if time.monotonic() < saved_until:
+                    lines.append(saved_msg)
+                draw_overlay(canvas, lines)
             else:
                 canvas[:] = 0
                 draw_overlay(canvas, ["FPS --", rx.status])
@@ -233,6 +247,10 @@ def main():
             key = cv2.waitKey(30) & 0xFF
             if key in (ord("q"), 27) or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                 break
+            if key == ord(" ") and last_frame is not None:
+                path = save_frame(last_frame, HERE / "captures")
+                log("host", f"saved frame #{last_frame.index} -> {path}")
+                saved_msg, saved_until = f"saved {path.name}", time.monotonic() + 1.5
             if t_end and time.monotonic() > t_end:
                 break
     finally:
