@@ -197,7 +197,7 @@ INC_FOLDERS += \
 	$(PROJ_DIR)/config \
 	$(PROJ_DIR)/HM01B0 \
 	$(PROJ_DIR)/bmi270 \
-	$(PROJ_DIR)/ \
+	$(PROJ_DIR) \
 	$(PROJ_DIR)/sdk_patch \
 	$(SDK_ROOT)/components/libraries/balloc \
 	$(SDK_ROOT)/components/libraries/ecc \
@@ -274,12 +274,17 @@ OPT = -O3 -g3
 #OPT += -flto
 
 # Dev Kit BSP file
-banji_dev: CFLAGS += -DBOARD_PCA10056
+banji_dev: CFLAGS += -DBOARD_PCA10056 -DFF=0
 banji_dev: ASMFLAGS += -DBOARD_PCA10056
 
 # FF Kit BSP file
 banji: CFLAGS += -DBOARD_CUSTOM
 banji: ASMFLAGS += -DBOARD_CUSTOM
+
+# Opt-in debug logging over SEGGER RTT: make banji_dev RTT_LOG=1
+ifeq ($(RTT_LOG),1)
+CFLAGS += -DNRF_LOG_ENABLED=1 -DNRF_LOG_BACKEND_RTT_ENABLED=1 -DDEBUG
+endif
 
 # C flags common to all targets
 CFLAGS += $(OPT)

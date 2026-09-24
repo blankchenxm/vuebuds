@@ -144,6 +144,8 @@ void hm01b0_init_optimized_vlm(void)
   i2cWrite16(CAMERA_I2C_ADDR, REG_LINE_LENGTH_PCLK_H, 0x01);
   i2cWrite16(CAMERA_I2C_ADDR, REG_LINE_LENGTH_PCLK_L, 0x78);
   i2cWrite16(CAMERA_I2C_ADDR, REG_QVGA_WIN_EN, 0x01);
+  // Without this the frame size registers never latch and the sensor stays at 162x324.
+  i2cWrite16(CAMERA_I2C_ADDR, REG_GRP_PARAM_HOLD, 0x1);
 #endif
 
   // Unknown Regs (keeping your existing values)

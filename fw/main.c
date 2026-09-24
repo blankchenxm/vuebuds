@@ -182,6 +182,7 @@ static void logInit(void)
 {
   ret_code_t err_code = NRF_LOG_INIT(app_timer_cnt_get);
   APP_ERROR_CHECK(err_code);
+  NRF_LOG_DEFAULT_BACKENDS_INIT();
 }
 
 static void powerInit(void)
@@ -207,7 +208,7 @@ static void idle(void)
 static void mustardInit(void)
 {
   gpioInit();
-  // logInit();
+  logInit();
   NRF_LOG_RAW_INFO("%08d [mustard] booting...\n", systemTimeGetMs());
   timersInit();
   ret_code_t err_code;

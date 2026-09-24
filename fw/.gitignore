@@ -1,0 +1,3 @@
+_build_win/
+_build_win_nolog/
+tools/.venv/
