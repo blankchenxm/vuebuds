@@ -5,6 +5,25 @@
 
 ---
 
+## 2026-09-30 · 编译时选模式 CAM_MODE=QVGA/QQVGA,QQVGA 首次上板(PR #11,Issue #10)
+
+- **阶段**:TODO 第 2 步(编译时选模式,HM01B0)
+- **改了什么**:
+  - `fw/Makefile`:`CAM_MODE=QVGA`(默认)/ `QQVGA` → `-DCAMERA_MODE=…`,其他值直接报错;可选 `CAM_TEST_PATTERN=COLOR_BAR / WALKING_1`;`make help` 列出这些选项。
+  - `fw/tools/dk.ps1`:新增 `-Mode QVGA|QQVGA`、`-ColorBar`;每种组合用单独的输出目录(如 `_build_win_qqvga_colorbar`),因为 SDK Makefile 只改编译参数时不会重新编译。
+  - `fw/.gitignore`:改成 `_build_win*/`,覆盖所有编译目录。
+- **为什么**:已定的决定,模式在编译时选,不做运行时切换。驱动和采集层在 PR #9 里已经按 `mode_info` 工作,这一步只需要接上编译选项并上板验证。
+- **和原代码的行为差异**:默认编译(QVGA)和 PR #9 完全一样。QQVGA 在原代码里只能改头文件打开,收的是 162×119;现在按 `mode_info` 收第 1–121 行,发出 160×120。原来的 QQVGA 从没在 DK 上跑过。
+- **验证**(nRF52840 DK + HM01B0):
+  - QQVGA 真实画面:viewer 20 s 收 87 帧 160×120,7009 包 0 丢包,约 3.6–5 fps;RTT 抓到的 51 行逐帧日志全部是 `dma 19602`(= 121 行 × 162),无溢出,采集耗时 26.2 ms。这说明 156 µs 的片选延时**没有**切进第 0 行(PR #9 遗留问题排除)。
+  - QQVGA 帧缓冲池 208,192 B = 10 槽 × 19,764 B,和笔记 §5.2 一致。
+  - 彩条测试图:QQVGA 和 QVGA 都是奇偶行各自完全相同、条边笔直、0 丢包。QQVGA 只显示得下 3 条(条宽固定约 52 个输出像素),属于测试图本身的特点。
+  - QVGA 回归:每帧 `dma 39528 39204`。
+  - `CAM_MODE=VGA` 时 make 报错退出。
+- **遗留 / 下一步**:
+  - TODO 第 3 步:HM0360 驱动 + 上板。
+  - 有一次 Windows 在 BLE 刚连上时取消了连接;固件断连就复位,RTT logger 因此断开,重跑即可(已记进 CLAUDE.md 已知坑)。
+
 ## 2026-09-30 · 重构 HM01B0 采集链路:传感器驱动分层 + 帧缓冲池 + 发送时裁剪 + 帧头带宽高(PR #9,Issue #8)
 
 - **阶段**:TODO 第 1 步(重构 HM01B0)

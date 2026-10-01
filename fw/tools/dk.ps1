@@ -5,17 +5,24 @@
 #   .\tools\dk.ps1 rtt -Seconds 20    # capture RTT channel 0 to _build_win\rtt.log
 #   .\tools\dk.ps1 run -Seconds 20    # build + flash + capture RTT
 #   .\tools\dk.ps1 camera -Frames 3   # reset, pull frames over BLE into _build_win\frames, show RTT log
+#   .\tools\dk.ps1 run -Mode QQVGA -ColorBar   # camera mode / color bar test pattern (build, flash, run)
 param(
   [Parameter(Position = 0)][ValidateSet('build', 'flash-sd', 'flash', 'rtt', 'run', 'camera', 'erase')]
   [string]$Command = 'run',
   [int]$Seconds = 15,
   [int]$Frames = 3,
+  [ValidateSet('QVGA', 'QQVGA')][string]$Mode = 'QVGA',
+  [switch]$ColorBar,
   [switch]$NoLog
 )
 
 $ErrorActionPreference = 'Stop'
 $FwDir = Split-Path -Parent $PSScriptRoot
-$OutDir = if ($NoLog) { '_build_win_nolog' } else { '_build_win' }
+# One output directory per build variant: the SDK makefiles do not rebuild when only flags change.
+$OutDir = '_build_win'
+if ($NoLog) { $OutDir += '_nolog' }
+if ($Mode -ne 'QVGA') { $OutDir += '_' + $Mode.ToLower() }
+if ($ColorBar) { $OutDir += '_colorbar' }
 $Hex = Join-Path $FwDir "$OutDir\banji_dev.hex"
 $SdHex = Join-Path $FwDir 'sdk\components\softdevice\s140\hex\s140_nrf52_7.2.0_softdevice.hex'
 $RttLog = Join-Path $FwDir '_build_win\rtt.log'
@@ -35,8 +42,9 @@ function Invoke-Build {
   # SDK makefiles need a POSIX shell and a toolchain path without spaces.
   $gcc = (Get-ShortPath $GccBin) -replace '\\', '/'
   $rtt = if ($NoLog) { '' } else { 'RTT_LOG=1' }
+  $pattern = if ($ColorBar) { 'CAM_TEST_PATTERN=COLOR_BAR' } else { '' }
   $fw = $FwDir -replace '\\', '/'
-  $cmd = "cd '$fw' && make banji_dev OUTPUT_DIRECTORY=$OutDir GNU_INSTALL_ROOT=$gcc/ $rtt -j8"
+  $cmd = "cd '$fw' && make banji_dev OUTPUT_DIRECTORY=$OutDir GNU_INSTALL_ROOT=$gcc/ CAM_MODE=$Mode $pattern $rtt -j8"
   & $GitBash -lc $cmd
   if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)" }
 }

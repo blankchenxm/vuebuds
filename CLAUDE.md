@@ -42,8 +42,10 @@
 .\tools\dk.ps1 flash-sd       # 只在擦除芯片后需要:烧 S140 7.2.0
 .\tools\dk.ps1 run -Seconds 20 # 编译 + 烧录 + 抓 RTT 日志
 .\tools\dk.ps1 camera -Frames 3 # 复位 + 通过 BLE 收图存到 _build_win\frames\ + 打印 RTT
+.\tools\dk.ps1 run -Mode QQVGA -ColorBar  # 选模式(默认 QVGA)/ 彩条测试图;每种组合单独输出目录 _build_win_qqvga_colorbar
 ..\host\.venv\Scripts\python.exe ..\host\viewer.py --rtt --reset --duration 20 --snapshot ..\host\logs\shot.png
 ```
+- 直接用 make:`make banji_dev CAM_MODE=QQVGA CAM_TEST_PATTERN=COLOR_BAR OUTPUT_DIRECTORY=_build_win_qqvga_colorbar ...`。**只改这些参数时 SDK Makefile 不会重新编译**,所以每种组合要用不同的 `OUTPUT_DIRECTORY`(`dk.ps1` 已自动处理)。
 - 在 bash 里直接调 make 要额外 CFLAGS 时,用环境变量:`CFLAGS=-DXXX make banji_dev ...`;**不要**在命令行写 `CFLAGS+=`,会覆盖 Makefile 里的全部参数。
 - 设备:J-Link SN `1050221517`;BLE 名 `mustard`,地址 `D6:25:79:FD:6A:6B`;数据特征 `47ea1402-a0e4-554e-5282-0afcd3246970`(notify),控制 `47ea1403-…`,写 `0xB1` 开始推流(`ble_cus.h` 注释里的 UUID 字节序是错的)。
 - 诊断:RTT 是主要手段;读 RAM 变量/寄存器可以用 `JLink.exe -CommandFile`(一次会话批量读,比逐条 `nrfjprog --memrd` 快很多);`arm-none-eabi-nm` 查变量地址。
@@ -55,8 +57,10 @@
 - `NRF_LOG_DEFERRED=0`(立即输出日志)会拖慢中断,导致帧上下半错位;调试时临时用可以,别留下。
 - 推流时 RTT 日志:PR #9 起 `idle()` 推流时也处理日志、去掉了 `sent NkB` 刷屏,每帧一行 `[cam] frame N: … dma <段1字节> <段2字节>`;看不到时先查这里。
 - HM01B0 尺寸寄存器(`sensors/hm01b0/hm01b0_modes.c` 的模式表)末尾必须写 `GROUP_PARAMETER_HOLD 0x0104 = 1`(HM0360 对应 `COMMAND_UPDATE 0x0104`),否则参数不生效。
-- 每帧 DMA 字节数是对齐的最好证据:HM01B0 QVGA 应为 `39528 39204`(122 + 121 行 × 324),不是行宽整数倍就说明丢字节/错位。
-- HM01B0 黑白传感器的"彩条"测试图显示成棋盘格,奇偶行不同是正常的;看彩条边界是否上下笔直来判断对齐。
+- 每帧 DMA 字节数是对齐的最好证据:HM01B0 QVGA 应为 `39528 39204`(122 + 121 行 × 324),QQVGA 应为 `19602`(121 行 × 162);不是行宽整数倍就说明丢字节/错位。
+- HM01B0 黑白传感器的"彩条"测试图显示成棋盘格,奇偶行不同是正常的;看彩条边界是否上下笔直来判断对齐。条宽固定约 52 个输出像素,所以 QVGA 看到 6 条、QQVGA 只看到 3 条,正常。
+- PowerShell 里不要用 `viewer.py … | Select-Object -First N`:管道提前结束会把 viewer 一起杀掉,时长和截图都不完整。输出重定向到 `$null`,再从 `host/logs/session-*.log` 统计。
+- Windows 偶尔在 BLE 刚连上时取消连接(`操作已被用户取消`),viewer 会自动重连;但固件断连会 `NVIC_SystemReset`,而 JLinkRTTLogger 在芯片重启后不会重新连上 RTT,这一次会话就没有固件日志了,重跑即可。
 - 在 bash heredoc 里用 Python 改 C 文件时,`\\n` 会被转义成真换行;含反斜杠的改动用 Edit 工具。
 - HM0360 datasheet:`D:\Projects\Proactive camera agent\HM0360.pdf`。Read 工具会误报"加密",用 pypdf 提取文字即可(图 6.4 时钟分频图在笔记里有截图)。
 - 传感器驱动结构参照 ESP32 驱动:GitHub `blankchenxm/hm01b0-esp-idf-driver` → `components/hm01b0/`(未克隆到本地,用 `gh api` 读)。
@@ -92,6 +96,6 @@
 ## TODO 各步的验收标准(笔记 §8)
 
 1. ✅(PR #9)**重构(HM01B0)**:viewer 看到**标准 320×240** 画面(324×244 的槽,DMA 按原时序收第 1–243 行,发送时裁剪),无黑带/错位;FPS 约 0.7–0.9;0 丢包;BLE 帧头带宽高,viewer 按帧头适配;`arm-none-eabi-size` 确认 .bss 少了约 77 KB;帧缓冲池由链接器分配到剩余 RAM。注意画面和重构前不完全一样(左右少 2 列边框、底部不再缺 5 行),这是预期的。
-2. **编译时选模式(HM01B0)**:`CAM_MODE=QVGA` 和 `CAM_MODE=QQVGA` 两种编译结果都正确显示(320×240 / 160×120),彩条测试图正确,0 丢包。
+2. ✅(PR #11)**编译时选模式(HM01B0)**:`CAM_MODE=QVGA` 和 `CAM_MODE=QQVGA` 两种编译结果都正确显示(320×240 / 160×120),彩条测试图正确,0 丢包。
 3. **HM0360 驱动 + 上板**:I2C 读到 ID 0x0360;彩条测试图下 SPIS 收到的字节数 = 宽×高(验证 PCLKO = 8 MHz);QQVGA 再 QVGA 真实画面正常;viewer 看到的尺寸和 HM01B0 一样。
 4. **HM0360 Monitor(只做缓存)**:RTT 日志显示槽号循环、帧序号连续、时间戳间隔符合 RTC 周期;QQVGA 10 槽、QVGA 2 槽;帧间 XSLEEP 为低、MCLK 关闭。
