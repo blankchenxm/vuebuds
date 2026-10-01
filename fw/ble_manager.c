@@ -38,7 +38,6 @@
 
 #include "nrf_nvic.h"
 #include "timers.h"
-#include "HM01B0_BLE_DEFINES.h"
 #include "gpio.h"
 
 // Custom services
@@ -52,7 +51,6 @@ BLE_ADVERTISING_DEF(m_advertising); /**< Advertising module instance. */
 #define OPCODE_LENGTH 1
 #define HANDLE_LENGTH 2
 
-static uint32_t pixelsSent = 0; // equivalent to ble_bytes_sent_counter in prev codebase
 static uint16_t m_conn_handle = BLE_CONN_HANDLE_INVALID; /**< Handle of the current connection. */
 static uint8_t* transmitData;
 static uint32_t transmitLength;
@@ -64,11 +62,6 @@ static ble_uuid_t m_adv_uuids[] =                                               
   {CUSTOM_SERVICE_UUID, BLE_UUID_TYPE_VENDOR_BEGIN}
 };
 
-#define RING_BUFFER_SIZE TOTAL_IMAGE_SIZE
-static uint8_t ringBuffer[RING_BUFFER_SIZE] = {0};
-static uint32_t ringBufferHead = 0;
-static uint32_t ringBufferTail = 0;
-static uint32_t ringBufferBytesUsed = 0;
 static uint8_t sequenceNumber = 0;
 
 char const * phy_str(ble_gap_phys_t phys)
@@ -192,12 +185,8 @@ static void on_cus_evt(ble_cus_t * p_cus_service, ble_cus_evt_t * p_evt)
       break;
 
     case BLE_CUS_EVT_TRANSFER_1KB:
-    {
-      // if ((p_evt->bytes_transfered_cnt / 1024) == 0) {
-        NRF_LOG_RAW_INFO("%08d [ble] sent %ukB\n", systemTimeGetMs(), (p_evt->bytes_transfered_cnt / 1024));
-      // }
+      // Not logged: one line per KB (75 per frame) floods RTT and hides the per-frame log.
       break;
-    }
 
     default:
       // No implementation needed.
@@ -394,8 +383,8 @@ static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
 
     case BLE_GATTS_EVT_HVN_TX_COMPLETE:
       transmitDone = true;
-      // send(); // attempt to keep sending remaining bytes in ringBuffer
-      eventQueuePush(EVENT_BLE_SEND_DATA_DONE); // attempt to requeue mic data if ringBuffer was previously full
+      // send(); // attempt to keep sending the rest of the frame
+      eventQueuePush(EVENT_BLE_SEND_DATA_DONE); // attempt to send more if the SoftDevice queue was previously full
       NRF_LOG_DEBUG("Handle value notification");
       break;
 
@@ -532,98 +521,73 @@ void bleInit(void)
   NRF_LOG_RAW_INFO("%02X:%02X:%02X:%02X:%02X:%02X\n", address[0], address[1], address[2], address[3], address[4], address[5]);
 }
 
-// Packet format
-// 0: Sequence Number
-// 1: Status (1:Button state, 0:Camera New Frame)
-// 2-3: Accel X
-// 4-5: Accel Y
-// 6-7: Accel Z
-// 8-9: Gyro X
-// 10-11: Gyro Y
-// 12-13: Gyro Z
-// 14-xxx: Camera
-static uint8_t cameraDataStartIndex = 2;
-static bool startOfFrame = true;
+// Packet format (notification on the data characteristic)
+// 0: sequence number (wraps at 256)
+// 1: flags, bit0 = start of frame
+// start-of-frame packets only:
+//   2-3: frame width  (uint16, little endian)
+//   4-5: frame height (uint16, little endian)
+// rest: pixels, row by row
+#define PACKET_FLAG_START_OF_FRAME 0x01
+
+// Frame being sent: the standard region read row by row straight from the
+// capture slot (stride = transport width), so no copy of the frame is made.
+static const uint8_t *framePixels = NULL;
+static uint16_t frameStride;
+static uint16_t frameWidth;
+static uint16_t frameHeight;
+static uint16_t frameRow;
+static uint16_t frameCol;
+static bool startOfFrame = false;
 
 void send(void)
 {
-  bool transmitSuccess = true;
-  int32_t length = maxAttMtuBytes;
+  while (framePixels != NULL && frameRow < frameHeight) {
+    uint16_t row = frameRow;
+    uint16_t col = frameCol;
+    uint16_t length = 0;
 
-  while(transmitSuccess && (ringBufferBytesUsed > 0)) {
-    // if (ringBufferBytesUsed < (length - cameraDataStartIndex)) { break; }
-    if (ringBufferBytesUsed < (length - cameraDataStartIndex))
-    {
-      length = ringBufferBytesUsed + cameraDataStartIndex;
-    }
-
-    bleCusPacket[0] = sequenceNumber;
-    bleCusPacket[1] = 0x0;
+    bleCusPacket[length++] = sequenceNumber;
+    bleCusPacket[length++] = startOfFrame ? PACKET_FLAG_START_OF_FRAME : 0;
     if (startOfFrame) {
-      bleCusPacket[1] |= 0b1;
-      startOfFrame = false;
-#ifndef QQVGA
-      // Add a bit for higher res
-      bleCusPacket[1] |= 0b10;
-#endif
+      bleCusPacket[length++] = frameWidth & 0xFF;
+      bleCusPacket[length++] = frameWidth >> 8;
+      bleCusPacket[length++] = frameHeight & 0xFF;
+      bleCusPacket[length++] = frameHeight >> 8;
     }
 
-    for (int i = cameraDataStartIndex; i < length; i++) {
-      bleCusPacket[i] = ringBuffer[(ringBufferHead + (i - cameraDataStartIndex)) % RING_BUFFER_SIZE];
+    while (length < maxAttMtuBytes && row < frameHeight) {
+      uint16_t n = MIN(maxAttMtuBytes - length, frameWidth - col);
+      memcpy(&bleCusPacket[length], framePixels + (uint32_t)row * frameStride + col, n);
+      length += n;
+      col += n;
+      if (col == frameWidth) {
+        col = 0;
+        row++;
+      }
     }
 
-    transmitSuccess = ble_cus_transmit(&m_cus, bleCusPacket, length);
-
-    if (transmitSuccess) {
-      ringBufferHead = (ringBufferHead + (length - cameraDataStartIndex)) % RING_BUFFER_SIZE;
-      ringBufferBytesUsed -= (length - cameraDataStartIndex);
-      sequenceNumber++;
-      pixelsSent += length - cameraDataStartIndex;
+    if (!ble_cus_transmit(&m_cus, bleCusPacket, length)) {
+      break; // SoftDevice queue full; retry from the same position on the next call
     }
+
+    frameRow = row;
+    frameCol = col;
+    startOfFrame = false;
+    sequenceNumber++;
   }
 }
 
-void bleSendData(uint8_t * data, uint32_t length)
+void bleSendFrame(const uint8_t *pixels, uint16_t stride, uint16_t width, uint16_t height)
 {
-  if (length > RING_BUFFER_SIZE) {
-    NRF_LOG_RAW_INFO("[ble] input too large\n");
-  }
-
-  // Flag to reset image buffer on phone
+  framePixels = pixels;
+  frameStride = stride;
+  frameWidth = width;
+  frameHeight = height;
+  frameRow = 0;
+  frameCol = 0;
   startOfFrame = true;
-
-  for (uint32_t i = 0; i < length; i++) {
-    ringBuffer[(ringBufferTail + i) % RING_BUFFER_SIZE] = data[i];
-  }
-
-  ringBufferTail = (ringBufferTail + length) % RING_BUFFER_SIZE;
-  ringBufferBytesUsed += length;
   send();
-}
-
-bool bleBufferHasSpace(uint16_t length)
-{
-  return ((ringBufferBytesUsed + length) < RING_BUFFER_SIZE);
-}
-
-uint32_t bleGetRingBufferBytesAvailable(void)
-{
-  return (RING_BUFFER_SIZE - ringBufferBytesUsed);
-}
-
-void blePushSequenceNumber(void)
-{
-  sequenceNumber += 3;
-}
-
-void bleSetPixelsSent(uint32_t value)
-{
-  pixelsSent = value;
-}
-
-uint32_t bleGetPixelsSent(void)
-{
-  return pixelsSent;
 }
 
 ret_code_t bleDisconnect(void)
@@ -632,12 +596,9 @@ ret_code_t bleDisconnect(void)
 }
 
 void bleService(void) {
-  uint32_t prevPixelsSent = pixelsSent;
   send();
-  // NRF_LOG_RAW_INFO("ringBufferBytesUsed:%d\n", ringBufferBytesUsed);
-  // NRF_LOG_RAW_INFO("\n");
-  if (pixelsSent >= TOTAL_IMAGE_SIZE) {
+  if (framePixels != NULL && frameRow >= frameHeight) {
+    framePixels = NULL;
     eventQueuePush(EVENT_CAMERA_READY_NEXT_FRAME);
-    pixelsSent = 0;
   }
 }

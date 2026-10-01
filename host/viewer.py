@@ -213,7 +213,7 @@ def main():
     rx = BleReceiver(log, args.name, args.address)
     fps = FpsMeter()
 
-    w0, h0 = protocol.SIZE_HIGH_RES
+    w0, h0 = protocol.DEFAULT_SIZE
     canvas = np.zeros((h0 * args.scale, w0 * args.scale, 3), np.uint8)
     last_frame: protocol.Frame | None = None
     saved_msg, saved_until = "", 0.0

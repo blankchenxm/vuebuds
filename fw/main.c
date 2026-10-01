@@ -51,7 +51,6 @@
 #include "boards.h"
 #include "nrf_ppi.h"
 #include "nrf_timer.h"
-#include "HM01B0_BLE_DEFINES.h"
 
 APP_TIMER_DEF(imuTimer);
 APP_TIMER_DEF(buttonReleaseTimer);
@@ -198,9 +197,8 @@ static void powerInit(void)
 
 static void idle(void)
 {
-  if (streaming && eventQueueEmpty()) {
-    nrf_pwr_mgmt_run();
-  } else if (NRF_LOG_PROCESS() == false && eventQueueEmpty()) {
+  // Flush deferred logs while streaming too, otherwise RTT stays silent until streaming stops.
+  if (NRF_LOG_PROCESS() == false && eventQueueEmpty()) {
     nrf_pwr_mgmt_run();
   }
 }
@@ -277,9 +275,10 @@ static void processQueue(void)
       case EVENT_CAMERA_CAPTURE_DONE:
       {
         NRF_LOG_RAW_INFO("%08d [cam] EVENT_CAMERA_CAPTURE_DONE\n", systemTimeGetMs());
-        uint8_t *camData;
-        uint32_t camDataLength = cameraGetFrameBuffer(&camData);
-        bleSendData(camData, camDataLength);
+        camera_frame_t frame;
+        if (cameraGetFrame(&frame)) {
+          bleSendFrame(frame.pixels, frame.stride, frame.width, frame.height);
+        }
         break;
       }
 

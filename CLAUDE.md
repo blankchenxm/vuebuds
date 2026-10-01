@@ -2,6 +2,7 @@
 
 用户的 fork,目标:在 **nRF52840 DK** 上复现 VueBuds 的摄像头 + BLE 传图,并把传感器从 HM01B0 迁移到 HM0360。
 **和用户交流用中文。**
+**凡是改动 VueBuds 原有设计或行为(采集时序、片选/DMA 方式、中断用法、日志、BLE 协议等),哪怕看起来是修 bug 或加诊断,都要先告诉用户、说明证据和可选方案,由用户决定;"重构"阶段默认保持原设计。PR 和 DEVLOG 里列出所有行为差异。**
 
 ## 设计文档(先读)
 
@@ -11,13 +12,16 @@
 - 已定的决定,不要再推翻:
   - MCLK 由 nRF 提供 8 MHz(HM0360 不能用内部时钟跑 1-bit)。
   - 模式在编译时选(`CAM_MODE=QVGA/QQVGA`),**不做运行时切换**。
-  - DMA 收传感器完整输出(HM01B0 QVGA 324×244、QQVGA 162×122),**固件发 BLE 时裁成标准 320×240 / 160×120**;BLE 帧头带宽高。HM0360 用窗口模式 `0x3030[0]=1` 直接输出标准尺寸(笔记 §5.3)。
+  - 帧槽按传感器完整输出分配(HM01B0 QVGA 324×244、QQVGA 162×122),**固件发 BLE 时裁成标准 320×240 / 160×120**;BLE 帧头带宽高。HM0360 用窗口模式 `0x3030[0]=1` 直接输出标准尺寸(笔记 §5.3)。
+  - **片选时序保持 VueBuds 原设计**:FVLD 上升 → TIMER4 延时(QVGA 312 µs)→ 拉低 CS。HM01B0 第 0 行紧跟 FVLD 开始,这个延时**有意跳过第 0 行**,所以 DMA 收第 1–243 行(`mode_info.first_line = 1`),槽里第 0 行为空,标准裁剪 y=2 不受影响。在 FVLD 上升时就拉 CS(哪怕用 PPI)会丢第一个字节、整段错 1 像素(PR #9 实测)。
   - **Monitor 只做 HM0360**,用 S2;不开运动检测;不做触发/回传;不做 VGA。
   - RAM 保持现状(RTT 保留,日志缓冲 16 KB、堆 8 KB 不缩小)。
 
 ## 仓库结构
 
 - `fw/`:nRF5 SDK 17.1.0 裸机固件(Makefile,**不是** Zephyr / NCS)。DK 目标是 `banji_dev`(`-DBOARD_PCA10056 -DFF=0`);`banji` 是作者的自制板,不要在 DK 上烧。
+- 固件里的摄像头分三层:`fw/sensors/`(公共接口 `camera_sensor.h` + `hm01b0/`,结构照 ESP32 驱动:`include/`、`private_include/`、寄存器表 `hm01b0_modes.c`、`mode_info`)→ `fw/capture/`(nRF 专用:MCLK、帧缓冲池、SPIS + 片选 + DMA 自动分段)→ `fw/camera.c`(编排,`CAMERA_MODE` / `CAMERA_TEST_PATTERN` 编译时宏)。BLE 发送在 `ble_manager.c` 的 `bleSendFrame()`,直接从槽里按标准区域逐行读。
+- 帧缓冲池 = 链接脚本里 `__frame_pool_start`(堆尾)到 `__frame_pool_end`(栈底)之间的全部 RAM,约 208 KB。
 - `fw/sdk/`:整份 SDK(已打好 `sdk_patch/nrfx_spis*` 补丁);`fw/_build/` 是作者在 macOS 上的编译产物,不要改;Windows 编译输出在 `fw/_build_win/`(已 gitignore)。
 - `host/`:电脑端 `viewer.py`(BLE 实时预览,空格存图,`--rtt --reset` 合并固件日志)。
 - `hw/`:KiCad 硬件。**用户可能有未提交的 KiCad 改动和锁文件,不要提交、不要还原。**
@@ -49,8 +53,11 @@
 - **J-Link 同时只能一个工具稳定使用**:用户的 JLinkRTTViewer 开着时会冲突;`nrfjprog --reset` 必须在启动 JLinkRTTLogger **之前**做,否则报 `Cannot connect to J-Link`。
 - **PowerShell 5.1 传给原生程序的参数里有引号/特殊字符会被拆乱**:commit message 用 `git commit -F <文件>`,PR 正文用 `gh pr create --body-file <文件>`(文件写到 scratchpad)。
 - `NRF_LOG_DEFERRED=0`(立即输出日志)会拖慢中断,导致帧上下半错位;调试时临时用可以,别留下。
-- 推流时 RTT 日志会延迟/丢失(`sent NkB` 刷屏 + `idle()` 只在有事件时处理日志),对照时以固件毫秒时间戳为准。
-- `fw/HM01B0/HM01B0_FUNC.c` 修改尺寸寄存器后必须写 `REG_GRP_PARAM_HOLD`(HM0360 对应 `COMMAND_UPDATE 0x0104`),否则参数不生效。
+- 推流时 RTT 日志:PR #9 起 `idle()` 推流时也处理日志、去掉了 `sent NkB` 刷屏,每帧一行 `[cam] frame N: … dma <段1字节> <段2字节>`;看不到时先查这里。
+- HM01B0 尺寸寄存器(`sensors/hm01b0/hm01b0_modes.c` 的模式表)末尾必须写 `GROUP_PARAMETER_HOLD 0x0104 = 1`(HM0360 对应 `COMMAND_UPDATE 0x0104`),否则参数不生效。
+- 每帧 DMA 字节数是对齐的最好证据:HM01B0 QVGA 应为 `39528 39204`(122 + 121 行 × 324),不是行宽整数倍就说明丢字节/错位。
+- HM01B0 黑白传感器的"彩条"测试图显示成棋盘格,奇偶行不同是正常的;看彩条边界是否上下笔直来判断对齐。
+- 在 bash heredoc 里用 Python 改 C 文件时,`\\n` 会被转义成真换行;含反斜杠的改动用 Edit 工具。
 - HM0360 datasheet:`D:\Projects\Proactive camera agent\HM0360.pdf`。Read 工具会误报"加密",用 pypdf 提取文字即可(图 6.4 时钟分频图在笔记里有截图)。
 - 传感器驱动结构参照 ESP32 驱动:GitHub `blankchenxm/hm01b0-esp-idf-driver` → `components/hm01b0/`(未克隆到本地,用 `gh api` 读)。
 
@@ -84,7 +91,7 @@
 
 ## TODO 各步的验收标准(笔记 §8)
 
-1. **重构(HM01B0)**:viewer 看到**标准 320×240** 画面(DMA 收完整 324×244,发送时裁剪),无黑带/错位;FPS 约 0.7–0.9;0 丢包;BLE 帧头带宽高,viewer 按帧头适配;`arm-none-eabi-size` 确认 .bss 少了约 77 KB;帧缓冲池由链接器分配到剩余 RAM。注意画面和重构前不完全一样(左右少 2 列边框、底部不再缺 5 行),这是预期的。
+1. ✅(PR #9)**重构(HM01B0)**:viewer 看到**标准 320×240** 画面(324×244 的槽,DMA 按原时序收第 1–243 行,发送时裁剪),无黑带/错位;FPS 约 0.7–0.9;0 丢包;BLE 帧头带宽高,viewer 按帧头适配;`arm-none-eabi-size` 确认 .bss 少了约 77 KB;帧缓冲池由链接器分配到剩余 RAM。注意画面和重构前不完全一样(左右少 2 列边框、底部不再缺 5 行),这是预期的。
 2. **编译时选模式(HM01B0)**:`CAM_MODE=QVGA` 和 `CAM_MODE=QQVGA` 两种编译结果都正确显示(320×240 / 160×120),彩条测试图正确,0 丢包。
 3. **HM0360 驱动 + 上板**:I2C 读到 ID 0x0360;彩条测试图下 SPIS 收到的字节数 = 宽×高(验证 PCLKO = 8 MHz);QQVGA 再 QVGA 真实画面正常;viewer 看到的尺寸和 HM01B0 一样。
 4. **HM0360 Monitor(只做缓存)**:RTT 日志显示槽号循环、帧序号连续、时间戳间隔符合 RTC 周期;QQVGA 10 槽、QVGA 2 槽;帧间 XSLEEP 为低、MCLK 关闭。

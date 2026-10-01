@@ -1,9 +1,11 @@
 """BLE protocol of the vuebuds "mustard" firmware (see fw/ble_cus.c, fw/ble_manager.c).
 
 control char 0x1403: write 0xB1 to start the camera stream
-data    char 0x1402: notifications of [seq, flags, pixels...]
-                     flags bit0 = start of frame, bit1 = 324x239 (else 162x119)
+data    char 0x1402: notifications of [seq, flags, payload...]
+                     flags bit0 = start of frame; a start-of-frame payload begins with
+                     width and height (uint16 little endian each), followed by pixels
 """
+import struct
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -16,9 +18,9 @@ CONTROL_UUID = _BASE.format(0x1403)
 CMD_STREAM_START = 0xB1
 
 FLAG_START_OF_FRAME = 0x01
-FLAG_HIGH_RES = 0x02
-SIZE_HIGH_RES = (324, 239)
-SIZE_LOW_RES = (162, 119)
+FRAME_HEADER = struct.Struct("<HH")  # width, height
+# Placeholder canvas size before the first frame header arrives.
+DEFAULT_SIZE = (320, 240)
 
 
 @dataclass
@@ -62,7 +64,7 @@ class FrameAssembler:
             return
         now = time.monotonic()
         self.total_packets += 1
-        seq, flags, pixels = data[0], data[1], data[2:]
+        seq, flags, payload = data[0], data[1], data[2:]
 
         if self._last_seq is not None:
             gap = (seq - self._last_seq - 1) & 0xFF
@@ -77,13 +79,17 @@ class FrameAssembler:
                 self.discarded += 1
                 self.on_event(f"discarding partial frame: {len(self._buf)} bytes")
             self._reset_frame()
-            self._size = SIZE_HIGH_RES if flags & FLAG_HIGH_RES else SIZE_LOW_RES
+            if len(payload) < FRAME_HEADER.size:
+                self.on_event(f"start-of-frame packet too short: {len(payload)} bytes")
+                return
+            self._size = FRAME_HEADER.unpack_from(payload)
+            payload = payload[FRAME_HEADER.size:]
             self._t_start = now
         if self._size is None:
             return
 
         self._packets += 1
-        self._buf += pixels
+        self._buf += payload
         w, h = self._size
         if len(self._buf) >= w * h:
             self.frames += 1

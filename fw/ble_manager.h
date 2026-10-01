@@ -3,22 +3,12 @@
 
 void bleAdvertisingStart();
 void bleInit(void);
-void bleSendData(uint8_t * data, uint32_t length);
-bool bleSendPacket(uint8_t * data, uint32_t length);
-bool bleCanTransmit(void);
-bool bleBufferHasSpace(uint16_t length);
-uint32_t bleGetRingBufferBytesAvailable(void);
-void blePushSequenceNumber(void);
 void send(void);
 
-void bleImuSendData(uint8_t * data, uint16_t length);
-void bleImuResetBuffer(void);
+/* Send a width x height frame whose rows are stride bytes apart. pixels must stay valid until
+ * EVENT_CAMERA_READY_NEXT_FRAME. */
+void bleSendFrame(const uint8_t *pixels, uint16_t stride, uint16_t width, uint16_t height);
 
-void bleSetButtonPressed(bool pressed);
-
-// ble_bytes_sent_counter from prev codebase
-void bleSetPixelsSent(uint32_t value);
-uint32_t bleGetPixelsSent(void);
 ret_code_t bleDisconnect(void);
 void bleService(void);
 

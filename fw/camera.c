@@ -1,35 +1,59 @@
 #include <stdbool.h>
 #include <stdint.h>
-#include <string.h>
-#include <stdlib.h>
-#include <nrfx.h>
 
-#include "HM01B0_CAPTURE.h"
-#include "HM01B0_SPI.h"
+#include "nrf_log.h"
+#include "camera_sensor.h"
+#include "capture.h"
 #include "camera.h"
 #include "gpio.h"
+#include "timers.h"
 
-uint32_t image_size;
+// Mode and test pattern are compile-time choices (no runtime switching).
+#ifndef CAMERA_MODE
+#define CAMERA_MODE CAMERA_MODE_QVGA
+#endif
+#ifndef CAMERA_TEST_PATTERN
+#define CAMERA_TEST_PATTERN CAMERA_TEST_PATTERN_OFF
+#endif
+
+#define CAMERA_POR_DELAY_MS 100
+#define CAMERA_STANDBY_DELAY_MS 5
+
 static bool cameraInitialized = false;
+static const camera_sensor_t *sensor = NULL;
+static camera_mode_info_t modeInfo;
 
 void cameraInit(void)
 {
-  if (!cameraInitialized) {
-    hm_reset_capture_done();
-
-    // TODO: ENABLE CAMERA POWER HERE
-    // something like // cameraEnablePower();
-
-    hm_peripheral_init();
-
-    // TODO: This initialized the SPI slave, we should move this to when the BLE connection establishes
-    hm_peripheral_connected_init();
-
-    NRF_LOG_INFO("[camera] initialized");
-    cameraInitialized = true;
-  } else {
+  if (cameraInitialized) {
     NRF_LOG_INFO("[camera] already initialized, skipping");
+    return;
   }
+
+  // The sensor runs from our MCLK, including its I2C slave, so start it first.
+  capture_mclk_init();
+  delayMs(CAMERA_POR_DELAY_MS);
+
+  if (camera_sensor_detect(&sensor) != NRF_SUCCESS) {
+    capture_mclk_enable(false);
+    return;
+  }
+
+  APP_ERROR_CHECK(sensor->get_mode_info(CAMERA_MODE, &modeInfo));
+  ret_code_t err_code = sensor->init(CAMERA_MODE, CAMERA_TEST_PATTERN);
+  if (err_code != NRF_SUCCESS) {
+    NRF_LOG_RAW_INFO("[camera] %s init failed: 0x%x\n", sensor->name, err_code);
+  }
+  NRF_LOG_RAW_INFO("[camera] %s %s, test pattern %d, sent as %ux%u\n", sensor->name,
+                   camera_mode_name(CAMERA_MODE), CAMERA_TEST_PATTERN,
+                   modeInfo.standard.width, modeInfo.standard.height);
+
+  capture_init(&modeInfo);
+
+  // Clock gating: MCLK only runs while streaming.
+  capture_mclk_enable(false);
+
+  cameraInitialized = true;
 }
 
 void cameraDeInit(void)
@@ -46,58 +70,61 @@ void cameraDeInit(void)
   gpioDisable(CAM_D2);
   gpioDisable(CAM_D3);
 
-  hm_peripheral_uninit();
-  hm_clk_enable(false);
-  // TODO: Fill this out
-}
-
-void cameraCaptureFrame(void)
-{
-  NRF_LOG_RAW_INFO("[cam] starting capture...\n");
-  hm_single_capture_spi_832();
-  NRF_LOG_RAW_INFO("[cam] Capture complete: size %i bytes\n", spiSlaveGetBytesReceived());
+  capture_uninit();
 }
 
 void cameraStartStream(void)
 {
-  NRF_LOG_RAW_INFO("Starting stream...\n");
-  hm_single_capture_spi_832_stream();
-}
-
-uint32_t cameraGetFrameBuffer(uint8_t** frame)
-{
-  return spiSlaveGetRxBuffer(frame);
+  if (!cameraInitialized) {
+    return;
+  }
+  capture_mclk_enable(true);
+  capture_arm();
+  sensor->stream_start();
+  NRF_LOG_RAW_INFO("%08d [cam] stream started\n", systemTimeGetMs());
 }
 
 void cameraReadyNextFrame(void)
 {
-  spiSlaveSetBuffers();
-  spiSlaveClearByteCounters();
-
-  /*Camera values initialized*/
-  hm_reset_capture_done();
-
-  /*Enable the FRAME VALID interrupt*/
-  nrf_drv_gpiote_in_event_enable(CAM_FRAME_VALID, true);
+  capture_arm();
 }
 
-uint32_t cameraGetLines(uint8_t** lines)
+bool cameraGetFrame(camera_frame_t *frame)
 {
-  return spiSlaveGetRxBufferStreaming(lines);
-}
+  if (!cameraInitialized) {
+    return false;
+  }
 
-uint32_t cameraGetBytesReceived(void)
-{
-  return spiSlaveGetBytesReceived();
-}
+  const capture_stats_t *stats = capture_stats();
+  NRF_LOG_RAW_INFO("%08d [cam] frame %u: %u us, dma", systemTimeGetMs(), stats->frame, stats->duration_us);
+  for (uint8_t i = 0; i < stats->segments; i++) {
+    NRF_LOG_RAW_INFO(" %u", stats->segment_bytes[i]);
+  }
+  NRF_LOG_RAW_INFO("%s\n", stats->overflow ? " OVERFLOW" : "");
 
-void cameraReadyForMoreData(void)
-{
-  spiSlaveClearEventQueued();
+  frame->stride = modeInfo.transport_width;
+  frame->width = modeInfo.standard.width;
+  frame->height = modeInfo.standard.height;
+  frame->pixels = capture_frame() + (uint32_t)modeInfo.standard.y * frame->stride + modeInfo.standard.x;
+  return true;
 }
 
 void cameraEnableStandbyMode(bool standby)
 {
+  static bool currentStandby = false;
   NRF_LOG_INFO("[camera] standby:%d", standby);
-  hm_standby_mode(standby);
+  if (!cameraInitialized) {
+    return;
+  }
+  if (standby) {
+    sensor->stream_stop();
+    delayMs(CAMERA_STANDBY_DELAY_MS);
+    capture_mclk_enable(false);
+    currentStandby = true;
+  } else if (currentStandby) {
+    capture_mclk_enable(true);
+    delayMs(CAMERA_STANDBY_DELAY_MS);
+    sensor->stream_start();
+    currentStandby = false;
+  }
 }

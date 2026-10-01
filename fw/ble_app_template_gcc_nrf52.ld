@@ -128,3 +128,7 @@ SECTIONS
 
 
 INCLUDE "nrf_common.ld"
+
+/* Frame pool (capture/frame_pool.c): all RAM left between the heap and the stack. */
+__frame_pool_start = ALIGN(__HeapLimit, 4);
+__frame_pool_end = __StackLimit;

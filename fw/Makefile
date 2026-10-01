@@ -88,7 +88,9 @@ SRC_FILES += \
 	$(SDK_ROOT)/components/libraries/bsp/bsp.c \
 	$(SDK_ROOT)/components/libraries/bsp/bsp_btn_ble.c \
 	$(PROJ_DIR)/$(wildcard *.c) \
-	$(PROJ_DIR)/$(wildcard HM01B0/*.c) \
+	$(wildcard $(PROJ_DIR)/sensors/*.c) \
+	$(wildcard $(PROJ_DIR)/sensors/hm01b0/*.c) \
+	$(wildcard $(PROJ_DIR)/capture/*.c) \
 	$(PROJ_DIR)/$(wildcard bmi270/*.c) \
 	$(SDK_ROOT)/external/segger_rtt/SEGGER_RTT.c \
 	$(SDK_ROOT)/external/segger_rtt/SEGGER_RTT_Syscalls_GCC.c \
@@ -195,7 +197,9 @@ INC_FOLDERS += \
 	$(SDK_ROOT)/components/nfc/t4t_parser/apdu \
 	$(SDK_ROOT)/components/libraries/util \
 	$(PROJ_DIR)/config \
-	$(PROJ_DIR)/HM01B0 \
+	$(PROJ_DIR)/sensors \
+	$(PROJ_DIR)/sensors/hm01b0/include \
+	$(PROJ_DIR)/capture \
 	$(PROJ_DIR)/bmi270 \
 	$(PROJ_DIR) \
 	$(PROJ_DIR)/sdk_patch \
