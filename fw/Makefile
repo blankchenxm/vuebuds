@@ -290,6 +290,22 @@ ifeq ($(RTT_LOG),1)
 CFLAGS += -DNRF_LOG_ENABLED=1 -DNRF_LOG_BACKEND_RTT_ENABLED=1 -DDEBUG
 endif
 
+# Camera mode, chosen at compile time (no runtime switching): make banji_dev CAM_MODE=QQVGA
+# Changing only these flags does not rebuild objects; use a separate OUTPUT_DIRECTORY per mode.
+CAM_MODE ?= QVGA
+ifeq ($(CAM_MODE),QVGA)
+CFLAGS += -DCAMERA_MODE=CAMERA_MODE_QVGA
+else ifeq ($(CAM_MODE),QQVGA)
+CFLAGS += -DCAMERA_MODE=CAMERA_MODE_QQVGA
+else
+$(error CAM_MODE must be QVGA or QQVGA, got '$(CAM_MODE)')
+endif
+
+# Optional sensor test pattern: make banji_dev CAM_TEST_PATTERN=COLOR_BAR (or WALKING_1)
+ifneq ($(CAM_TEST_PATTERN),)
+CFLAGS += -DCAMERA_TEST_PATTERN=CAMERA_TEST_PATTERN_$(CAM_TEST_PATTERN)
+endif
+
 # C flags common to all targets
 CFLAGS += $(OPT)
 CFLAGS += -DARM_MATH_CM4
@@ -369,6 +385,7 @@ help:
 	@echo following targets are available:
 	@echo   banji      - build form factor
 	@echo		banji_dev  - build dev kit
+	@echo		  options: RTT_LOG=1  CAM_MODE=QVGA/QQVGA  CAM_TEST_PATTERN=COLOR_BAR/WALKING_1
 	@echo		flash_softdevice - flash soft device
 	@echo		sdk_config - starting external tool for editing sdk_config.h
 	@echo		flash      - flashing form factor binary

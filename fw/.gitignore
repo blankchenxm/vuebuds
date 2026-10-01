@@ -1,3 +1,2 @@
-_build_win/
-_build_win_nolog/
+_build_win*/
 tools/.venv/
