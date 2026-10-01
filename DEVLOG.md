@@ -14,30 +14,31 @@
     - 1-bit 串行、MSB 先发、PCLKO 按行门控(datasheet 表 6.5)。
     - `PLL1CFG = 0x07`:Sensor_Core = 8 MHz ÷ 8 = 1 MHz,PCLKO = 8 MHz。
     - 窗口模式 640×480;QVGA = Sub2、QQVGA = Sub4,**不开合并**。
+    - 行长 376;帧长取传感器在这个模式下的最小值 **QVGA 276、QQVGA 156**(= 输出行数 + 36),帧周期 103.8 ms / 58.7 ms(9.6 / 17 fps)。
     - 关闭上下文切换和运动检测。
     - 画质调校(黑电平、色调映射、AE、厂商模拟寄存器)沿用 OpenMV 的表,但覆盖了其中不适合 1-bit / SPIS 的几项(见下面的"行为差异")。
   - `fw/sensors/camera_sensor.c`:注册 HM0360;`camera_sensor_detect()` 改成轮询读 ID(带超时)。
-  - `fw/camera.c`:开 MCLK 之后做硬件复位(XSHUTDOWN 低 → 高),XSLEEP 保持高。`fw/gpio.c`:开机把 XSHUTDOWN 拉低,让传感器保持在复位状态。`fw/gpio.h`:新增 `CAM_XSLEEP` P1.04、`CAM_XSHUTDOWN` P1.05。
-  - `fw/wiring_test.c` + `main.c` 里的 `#ifdef WIRING_TEST`:HM0360 接线 / 状态检测工具,10 项 PASS/FAIL;`tools/dk.ps1` 新增 `-WiringTest` 开关。
+  - `fw/camera.c`:开 MCLK 之后做硬件复位(XSHUTDOWN 低 → 高),XSLEEP 保持高。`fw/gpio.h`:新增 `CAM_XSLEEP` P1.04、`CAM_XSHUTDOWN` P1.05。
+  - `fw/wiring_test.c` + `main.c` 里的 `#ifdef WIRING_TEST`:HM0360 接线 / 状态检测工具,11 项 PASS/FAIL(第 11 项用 CPU 周期计数器测帧时序,核对帧周期 = 寄存器帧长 × 行长);`tools/dk.ps1` 新增 `-WiringTest` 开关(可配 `-Mode`)。
   - `fw/Makefile`:加入 `sensors/hm0360`。
 - **为什么**:笔记 §8 第 3 步。
 - **和原代码的行为差异**(HM01B0 的寄存器和采集流程都不变):
-  1. 开机时 `gpioInit()` 把 P1.05(XSHUTDOWN)拉低,`cameraInit()` 开 MCLK 后再放开。HM01B0 的板子上这个引脚没有连接,不受影响。
-  2. `cameraInit()` 多了一次硬件复位(拉低 10 ms + 等 1 ms),检测传感器改成轮询读 ID(超时 1 s)。
-  3. 检测到 HM0360 时走新的驱动;BLE 协议和采集层都不变。HM0360 的 `mode_info`:transport = standard = 320×240 / 160×120,片选延时 20 µs,从第 0 行开始收。
+  1. `cameraInit()` 开 MCLK 后多了一次硬件复位(P1.05 拉低 10 ms + 等 1 ms;HM01B0 模块没有 RST,这个引脚不连接,不起作用),检测传感器改成轮询读 ID(超时 1 s)。开机时**不再**拉低 P1.05(调试中加过,按用户意见去掉)。
+  2. 检测到 HM0360 时走新的驱动;BLE 协议和采集层都不变。HM0360 的 `mode_info`:transport = standard = 320×240 / 160×120,片选延时 20 µs,从第 0 行开始收。
 - **验证**(新 DK:SN 1050291681,nRF52840 REV3;模块 Arducam UC-806,MCLK = P1.08,RST = P1.05,XSLEEP = P1.04):
   - 接线检测 10 项全部 PASS:模块上拉、片选跳线、无 MCLK 时不应答、MCLK 输出、5/5 次复位都读到 0x0360、RST 能复位寄存器、XSLEEP 能断开 / 恢复 I2C、停 MCLK 后寄存器保留、**S2 唤醒流程寄存器保留且立刻可用**、FVLD / HVLD / PCLKO / D0 都有信号。
   - 彩条测试图:QQVGA 每帧 19,200 B,QVGA 每帧 38,400 + 38,400 B(= 宽 × 高,**验证了 PCLKO = 8 MHz**);奇偶行各自完全相同,条边笔直。
-  - 真实画面,30 s:QQVGA 66 帧 160×120,0 丢包,约 2.5–3.5 fps,DMA 全部正确;QVGA 16 帧 320×240,0 丢包,约 0.7–1.0 fps,1 帧带 `OVERFLOW`(见遗留)。
+  - 接线检测第 [11] 项:实测帧周期 QVGA 103,776 µs = 276 × 376 µs、QQVGA 58,656 µs = 156 × 376 µs,和寄存器一致(PASS)。
+  - 真实画面,30 s(修正帧长后):QQVGA 92 帧 160×120,0 丢包,约 3.3 fps,每帧耗时 58.6 ms;QVGA 24 帧 320×240,0 丢包,约 1.0 fps,每帧耗时 103.7 ms,25 帧 DMA 全部正确。第 1 帧(刚开始推流)耗时约两倍;QQVGA 92 帧里另有 3 帧耗时翻倍(帧结束中断赶不上 54 µs 的 FVLD 低电平,数据正确,只晚一帧,见 Issue #13)。
   - `.bss` 25,468 B。
 - **过程中的教训**:
   - 一开始用的是 OpenMV 的表,出现了三个问题:`0x30A5=0x04` 让 PCLKO 连续输出,按行门控失效,每行收到 376 字节;`0x30A1–0x30A4` 让每行多出 40 字节;`AE_CTRL=0x5F` 打开了自动降帧率,帧被拉长到约 600 ms。三项都已经在驱动里覆盖。
   - 开合并(Bin2 / Bin4)时,两种模式都出现大量黑 / 白竖条,关掉就正常;用户选了"只子采样"(方案 A)。
+  - "每帧耗时比计算值长"(QVGA 104 ms vs 99.6 ms):OpenMV 的帧长 265 / 132 **低于传感器在这个模式下的最小值**(输出行数 + 36),传感器自动改用 276 / 156;和自动曝光无关(关 AE、积分 32 行时序不变)。另外 HM0360 的 FVLD 是整帧周期信号:FVLD 上升 2 行后出第 0 行,36 行空白都在高电平里,帧间只低 54–65 µs,所以日志里的"耗时"≈ 帧周期。
   - 中间很长一段时间 HM0360 时好时坏、最后完全不响应 I2C,换引脚、断电都没用,**最后查出是模块 MCLK 的焊点不良**。期间先后怀疑过上电顺序、CPU 休眠影响 MCLK、XSHUTDOWN 断线,这些都被实验排除了。为了恢复调试,MCLK / RST 曾临时改到 P1.07 / P1.10 / P1.11,最后又改回了 P1.08 / P1.05。
 - **遗留 / 下一步**:
-  - **Issue #13**:QVGA 偶尔有一帧下半部错位(两段 DMA 之间的 CS 脉冲被 SoftDevice 推迟,超出约 56 µs 的行间消隐),以及帧结束的 FVLD 中断被推迟导致溢出。暂未修,Issue 里列了方案 A–D。
-  - QVGA 每帧耗时 104–207 ms,比寄存器算出来的约 100 ms 长,可能是 AE 的积分时间超过了帧长。要在第 4 步(Monitor 按固定周期采集)之前查清楚。
-  - HM01B0 的板子这次没有回归测试(DK 上接的是 HM0360);HM01B0 的路径代码没有改,但多了开机拉低 P1.05、`cameraInit` 里的复位脉冲,以及 ID 轮询。
+  - **Issue #13**:QVGA 偶尔有一帧下半部错位(两段 DMA 之间的 CS 脉冲被 SoftDevice 推迟,超出约 56 µs 的行间消隐);帧结束的 FVLD 中断赶不上 54–65 µs 的帧间低电平时,采集晚一帧(数据正确)。暂未修,Issue 里列了方案 A–D,以及"关 VSYNC 模式让 FVLD 只覆盖数据行"的实验方向。
+  - HM01B0 的板子这次没有回归测试(DK 上接的是 HM0360);HM01B0 的路径代码没有改,只多了 `cameraInit` 里对 P1.05 的复位脉冲(该引脚不连接)和 ID 轮询。
   - TODO 第 4 步:HM0360 Monitor(S2 唤醒已经提前验证可行)。
 
 ## 2026-09-30 · 编译时选模式 CAM_MODE=QVGA/QQVGA,QQVGA 首次上板(PR #11,Issue #10)

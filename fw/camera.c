@@ -30,8 +30,8 @@ static camera_mode_info_t modeInfo;
 
 /*
  * Reset the HM0360 through XSHUTDOWN with MCLK already running, so it always starts
- * from a clean state (gpioInit() holds it in reset until here), and keep XSLEEP high.
- * Both pins are unconnected on HM01B0 boards.
+ * from a clean state (it does not answer I2C if it powered up without MCLK), and keep
+ * XSLEEP high. Both pins are unconnected on HM01B0 boards, where this does nothing.
  */
 static void cameraHardwareReset(void)
 {

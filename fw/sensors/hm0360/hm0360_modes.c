@@ -288,10 +288,13 @@ const size_t hm0360_base_init_count = HM0360_TABLE_COUNT(hm0360_base_init);
 
 /*
  * Mode geometry and frame timing (Sensor_Core = 1 MHz, see interface table).
- * Line length 376 and frame length 265 / 132 are OpenMV's QVGA / QQVGA values:
- * QVGA 376 x 265 us ~ 10 fps, QQVGA 376 x 132 us ~ 20 fps. One QVGA line is
- * 320 px x 8 bit / 8 MHz = 320 us of data, leaving ~56 us of horizontal blanking
- * for the DMA segment switch. MAX_INTG = frame length - 4.
+ * Line length 376 (OpenMV's value): one QVGA line is 320 px x 8 bit / 8 MHz = 320 us
+ * of data, leaving ~56 us of horizontal blanking for the DMA segment switch.
+ * Frame length is the sensor's minimum in this setup, output lines + 36 (measured with
+ * wiring_test [11]: OpenMV's 265 / 132 are silently raised to 276 / 156):
+ *   QVGA  276 x 376 us = 103.8 ms (9.6 fps), QQVGA 156 x 376 us = 58.7 ms (17 fps).
+ * FVLD rises 2 lines before line 0 and stays high through the 36 blanking lines;
+ * it is low for only ~65 us between frames. MAX_INTG = frame length - 4.
  *
  * Sub-sampling only, binning off (like OpenMV): with binning on, both QVGA and QQVGA
  * show many stuck black/white columns on this setup (decided 2026-10-01).
@@ -301,11 +304,11 @@ const hm0360_regval_t hm0360_mode_qvga[] = {
   HM0360_REG_WRITE(HM0360_REG_V_SUBSAMPLE, HM0360_SUB_2),
   HM0360_REG_WRITE(HM0360_REG_BINNING_MODE, HM0360_BINNING_OFF),
   HM0360_REG_WRITE(HM0360_REG_FRAME_LENGTH_LINES_H, 0x01),
-  HM0360_REG_WRITE(HM0360_REG_FRAME_LENGTH_LINES_L, 0x09),
+  HM0360_REG_WRITE(HM0360_REG_FRAME_LENGTH_LINES_L, 0x14),  // 276
   HM0360_REG_WRITE(HM0360_REG_LINE_LENGTH_PCK_H, 0x01),
   HM0360_REG_WRITE(HM0360_REG_LINE_LENGTH_PCK_L, 0x78),
   HM0360_REG_WRITE(HM0360_REG_MAX_INTG_H, 0x01),
-  HM0360_REG_WRITE(HM0360_REG_MAX_INTG_L, 0x05),
+  HM0360_REG_WRITE(HM0360_REG_MAX_INTG_L, 0x10),  // 272
   HM0360_REG_WRITE(HM0360_REG_COMMAND_UPDATE, HM0360_COMMAND_UPDATE_APPLY),
 };
 const size_t hm0360_mode_qvga_count = HM0360_TABLE_COUNT(hm0360_mode_qvga);
@@ -315,11 +318,11 @@ const hm0360_regval_t hm0360_mode_qqvga[] = {
   HM0360_REG_WRITE(HM0360_REG_V_SUBSAMPLE, HM0360_SUB_4),
   HM0360_REG_WRITE(HM0360_REG_BINNING_MODE, HM0360_BINNING_OFF),
   HM0360_REG_WRITE(HM0360_REG_FRAME_LENGTH_LINES_H, 0x00),
-  HM0360_REG_WRITE(HM0360_REG_FRAME_LENGTH_LINES_L, 0x84),
+  HM0360_REG_WRITE(HM0360_REG_FRAME_LENGTH_LINES_L, 0x9C),  // 156
   HM0360_REG_WRITE(HM0360_REG_LINE_LENGTH_PCK_H, 0x01),
   HM0360_REG_WRITE(HM0360_REG_LINE_LENGTH_PCK_L, 0x78),
   HM0360_REG_WRITE(HM0360_REG_MAX_INTG_H, 0x00),
-  HM0360_REG_WRITE(HM0360_REG_MAX_INTG_L, 0x80),
+  HM0360_REG_WRITE(HM0360_REG_MAX_INTG_L, 0x98),  // 152
   HM0360_REG_WRITE(HM0360_REG_COMMAND_UPDATE, HM0360_COMMAND_UPDATE_APPLY),
 };
 const size_t hm0360_mode_qqvga_count = HM0360_TABLE_COUNT(hm0360_mode_qqvga);

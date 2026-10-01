@@ -14,7 +14,8 @@
   - 模式在编译时选(`CAM_MODE=QVGA/QQVGA`),**不做运行时切换**。
   - 帧槽按传感器完整输出分配(HM01B0 QVGA 324×244、QQVGA 162×122),**固件发 BLE 时裁成标准 320×240 / 160×120**;BLE 帧头带宽高。HM0360 用窗口模式 `0x3030[0]=1` 直接输出标准尺寸(笔记 §5.3)。
   - **片选时序保持 VueBuds 原设计**:FVLD 上升 → TIMER4 延时(QVGA 312 µs)→ 拉低 CS。HM01B0 第 0 行紧跟 FVLD 开始,这个延时**有意跳过第 0 行**,所以 DMA 收第 1–243 行(`mode_info.first_line = 1`),槽里第 0 行为空,标准裁剪 y=2 不受影响。在 FVLD 上升时就拉 CS(哪怕用 PPI)会丢第一个字节、整段错 1 像素(PR #9 实测)。
-  - **HM0360**(PR #14):QVGA = Sub2、QQVGA = Sub4,**只子采样、不开合并**(开合并两种模式都会出现大量黑/白竖条,2026-10-01 用户选方案 A);窗口模式 640×480;Sensor_Core = MCLK ÷ 8 = 1 MHz,1-bit 串行,PCLKO **按行门控**(`0x309E=0x02`、`0x30A5=0x01`、行前后沿 `0x30A1–0x30A4=0`);`AE_CTRL=0x1F`(关自动降帧率);片选沿用 VueBuds 方案,HM0360 参数 `fvld_to_cs_us = 20`、`first_line = 0`(收满全部行);开机 `gpioInit()` 把 RST 拉低,`cameraInit()` 开 MCLK 后再放开;不做软件复位。
+  - **HM0360**(PR #14):QVGA = Sub2、QQVGA = Sub4,**只子采样、不开合并**(开合并两种模式都会出现大量黑/白竖条,2026-10-01 用户选方案 A);窗口模式 640×480;Sensor_Core = MCLK ÷ 8 = 1 MHz,1-bit 串行,PCLKO **按行门控**(`0x309E=0x02`、`0x30A5=0x01`、行前后沿 `0x30A1–0x30A4=0`);`AE_CTRL=0x1F`(关自动降帧率);行长 376,**帧长 QVGA 276 / QQVGA 156**(传感器最小值 = 输出行数 + 36,设得更小会被悄悄抬高;帧周期 103.8 / 58.7 ms);片选沿用 VueBuds 方案,HM0360 参数 `fvld_to_cs_us = 20`、`first_line = 0`(收满全部行);`cameraInit()` 开 MCLK 后拉一下 RST(P1.05)再检测,**开机不拉低 RST**(用户决定,HM01B0 模块没有 RST);不做软件复位。
+  - HM0360 的 FVLD(`0x30A5=0x01` VSYNC 模式)是整帧周期信号:上升 2 行后出第 0 行,36 行空白都在高电平里,**帧间只低 54–65 µs**;日志里每帧"耗时"≈ 帧周期。
   - **Monitor 只做 HM0360**,用 S2;不开运动检测;不做触发/回传;不做 VGA。S2 唤醒流程(XSLEEP 低 → 关 MCLK → 开 MCLK → XSLEEP 高)已实测:立刻能读 I2C,寄存器保留,不用重写。
   - RAM 保持现状(RTT 保留,日志缓冲 16 KB、堆 8 KB 不缩小)。
 
@@ -45,7 +46,7 @@
 .\tools\dk.ps1 run -Seconds 20 # 编译 + 烧录 + 抓 RTT 日志
 .\tools\dk.ps1 camera -Frames 3 # 复位 + 通过 BLE 收图存到 _build_win\frames\ + 打印 RTT
 .\tools\dk.ps1 run -Mode QQVGA -ColorBar  # 选模式(默认 QVGA)/ 彩条测试图;每种组合单独输出目录 _build_win_qqvga_colorbar
-.\tools\dk.ps1 run -WiringTest -Seconds 20  # HM0360 接线 / 状态检测(10 项 PASS/FAIL);断电后第一次运行也能看到
+.\tools\dk.ps1 run -WiringTest -Seconds 25  # HM0360 接线 / 状态检测(11 项 PASS/FAIL,第 11 项测帧时序,可加 -Mode QQVGA);断电后第一次运行也能看到
 ..\host\.venv\Scripts\python.exe ..\host\viewer.py --rtt --reset --duration 20 --snapshot ..\host\logs\shot.png
 ```
 - 直接用 make:`make banji_dev CAM_MODE=QQVGA CAM_TEST_PATTERN=COLOR_BAR OUTPUT_DIRECTORY=_build_win_qqvga_colorbar ...`。**只改这些参数时 SDK Makefile 不会重新编译**,所以每种组合要用不同的 `OUTPUT_DIRECTORY`(`dk.ps1` 已自动处理)。
@@ -66,6 +67,8 @@
 - Windows 偶尔在 BLE 刚连上时取消连接(`操作已被用户取消`),viewer 会自动重连;但固件断连会 `NVIC_SystemReset`,而 JLinkRTTLogger 在芯片重启后不会重新连上 RTT,这一次会话就没有固件日志了,重跑即可。
 - 在 bash heredoc 里用 Python 改 C 文件时,`\\n` 会被转义成真换行;含反斜杠的改动用 Edit 工具。
 - **QVGA 偶发一帧下半部错位(Issue #13,暂未修)**:两段 DMA 之间的 CS 脉冲在 LVLD 中断里发,必须落在行间消隐(HM0360 约 56 µs、HM01B0 约 52 µs)内;SoftDevice 偶尔把中断推迟,RTT 会出现类似 `dma 38400 38378 OVERFLOW`。可选方案见 Issue #13。QQVGA 只有一段,不受影响。
+- **HM0360 偶发一帧耗时翻倍**(Issue #13):帧结束的 FVLD 下降沿中断要在 54–65 µs 内执行,赶不上时采集晚一个帧周期,可能带 `OVERFLOW`,但数据正确。每次推流的第 1 帧耗时约两倍是正常的。
+- **改 HM0360 帧长 / 行长后跑 `-WiringTest` 的第 [11] 项**,确认实测帧周期 = 寄存器帧长 × 行长(低于最小值会被传感器悄悄抬高)。
 - **HM0360 一直不响应 I2C 时,先查 MCLK 的焊点 / 接触**(2026-10-01 花了很久排查,最后是模块 MCLK 焊接不良;时好时坏,一坏整次运行都不响应)。先跑 `.\tools\dk.ps1 run -WiringTest`。
 - HM0360 必须有 MCLK 才响应 I2C(包括读 ID);上电时没有 MCLK 的话,要在 MCLK 运行后拉一下 RST(XSHUTDOWN)。
 - OpenMV 的 HM0360 表是给 8-bit 并口 + 24 MHz 写的,直接用于 1-bit / SPIS 会出问题:`0x30A5=0x04`(PCLKO 连续输出,按行门控失效,每行收到整个 376 时钟)、`0x30A1–0x30A4`(每行前后多 8 + 32 个时钟)、`AE_CTRL=0x5F`(自动降帧率,帧拉长到约 600 ms)。驱动里已覆盖,改寄存器表时注意。

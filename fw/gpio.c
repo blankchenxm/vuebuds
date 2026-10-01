@@ -44,12 +44,6 @@ void gpioInit(void)
       NRF_GPIO_PIN_S0S1,
       NRF_GPIO_PIN_NOSENSE);
 
-  // Hold the HM0360 in reset until cameraInit() resets it with MCLK running: it starts from a
-  // clean state, and a sensor left mid-transfer by an nRF reset cannot hold SDA low and hang
-  // the PMU scan below (seen during bring-up). Not connected on HM01B0 boards.
-  nrf_gpio_cfg_output(CAM_XSHUTDOWN);
-  nrf_gpio_pin_clear(CAM_XSHUTDOWN);
-
   gpioOutputEnable(LED1_PIN);
   gpioOutputEnable(LED2_PIN);
   gpioWrite(LED1_PIN, 1);

@@ -17,6 +17,13 @@
 #include "i2c.h"
 #include "gpio.h"
 #include "capture.h"
+#include "hm0360.h"
+
+#ifdef CAMERA_MODE
+#define WIRING_TEST_MODE CAMERA_MODE
+#else
+#define WIRING_TEST_MODE CAMERA_MODE_QVGA
+#endif
 
 #define ADDR      0x24
 #define MODEL_ID  0x0360
@@ -109,6 +116,90 @@ static uint32_t count_edges(uint32_t pin, uint32_t ms)
   NRF_PPI->CHENCLR = 1u << 15;
   NRF_GPIOTE->CONFIG[7] = 0;
   return n;
+}
+
+#define CYC_PER_US 64u
+#define PIN_HIGH(pin) ((NRF_P0->IN >> ((pin) & 31)) & 1)
+
+// Busy-wait until pin reaches level; returns false after timeout_cyc cycles.
+static bool wait_level(uint32_t pin, uint32_t level, uint32_t start, uint32_t timeout_cyc)
+{
+  while (PIN_HIGH(pin) != level) {
+    if (DWT->CYCCNT - start > timeout_cyc) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Measure one frame by polling FVLD / HVLD (both on port 0) with the cycle counter.
+// Returns the frame period (FVLD rise to next rise) in us, 0 on timeout.
+static uint32_t measure_frame(const char *label)
+{
+  const uint32_t timeout = 1000u * 1000u * CYC_PER_US;  // 1 s
+  uint32_t start = DWT->CYCCNT;
+  __disable_irq();
+  bool ok = wait_level(CAM_FRAME_VALID, 0, start, timeout) && wait_level(CAM_FRAME_VALID, 1, start, timeout);
+  uint32_t t_rise = DWT->CYCCNT, t_first = 0, t_last = 0, data_cyc = 0, lines = 0;
+  uint32_t prev_h = PIN_HIGH(CAM_LINE_VALID);
+  while (ok && PIN_HIGH(CAM_FRAME_VALID)) {
+    uint32_t h = PIN_HIGH(CAM_LINE_VALID);
+    if (h != prev_h) {
+      uint32_t now = DWT->CYCCNT;
+      if (h) {
+        if (lines == 0) t_first = now;
+        t_last = now;
+        lines++;
+      } else if (lines == 1) {
+        data_cyc = now - t_first;
+      }
+      prev_h = h;
+    }
+    if (DWT->CYCCNT - start > timeout) ok = false;
+  }
+  uint32_t t_fall = DWT->CYCCNT;
+  ok = ok && wait_level(CAM_FRAME_VALID, 1, start, 2 * timeout);
+  uint32_t t_next = DWT->CYCCNT;
+  __enable_irq();
+
+  if (!ok || lines < 2) {
+    LOG("     %s: timeout (lines %u)\n", label, lines);
+    return 0;
+  }
+  uint16_t intg = ((uint16_t)i2cRead16(ADDR, 0x0202) << 8) | i2cRead16(ADDR, 0x0203);
+  LOG("     %s: %u lines, line %u us (data %u us), FVLD high %u us\n", label, lines,
+      (t_last - t_first) / (lines - 1) / CYC_PER_US, data_cyc / CYC_PER_US, (t_fall - t_rise) / CYC_PER_US);
+  LOG("     %s: frame period %u us, integration %u lines\n", label, (t_next - t_rise) / CYC_PER_US, intg);
+  LOG("     %s: FVLD rise -> first line %u us, last line start -> FVLD fall %u us, FVLD low %u us\n", label,
+      (t_first - t_rise) / CYC_PER_US, (t_fall - t_last) / CYC_PER_US, (t_next - t_fall) / CYC_PER_US);
+  return (t_next - t_rise) / CYC_PER_US;
+}
+
+static void frame_timing(void)
+{
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
+  rst_pulse();
+  poll_id(1000);
+  ret_code_t err = hm0360_init(WIRING_TEST_MODE, CAMERA_TEST_PATTERN_OFF);
+  hm0360_stream_start();
+  uint32_t line = ((uint16_t)i2cRead16(ADDR, 0x0342) << 8) | i2cRead16(ADDR, 0x0343);
+  uint32_t frame = ((uint16_t)i2cRead16(ADDR, 0x0340) << 8) | i2cRead16(ADDR, 0x0341);
+  LOG("[11] frame timing, %s (init 0x%x), registers: line %u clocks, frame %u lines\n",
+      camera_mode_name(WIRING_TEST_MODE), err, line, frame);
+  nrf_delay_ms(500);  // let AE settle
+  uint32_t period_us = 0;
+  for (int i = 0; i < 2; i++) {
+    period_us = measure_frame("frame");
+  }
+  hm0360_stream_stop();
+
+  // A frame length below the sensor's minimum is silently raised, so check the period matches.
+  uint32_t expect_us = line * frame;
+  bool match = period_us + 376 > expect_us && period_us < expect_us + 376;
+  LOG("     period %u us vs registers %u x %u = %u us: %s\n", period_us, frame, line, expect_us, PASS(match));
 }
 
 static void wait_for_rtt_host(void)
@@ -224,6 +315,9 @@ void wiringTest(void)
   // NRF_LOG takes at most 6 arguments.
   LOG("[10] edges in 1 s: FVLD %u %s, HVLD %u %s\n", fvld, PASS(fvld > 0), hvld, PASS(hvld > fvld));
   LOG("     PCLKO %u %s, D0 %u %s\n", pclk, PASS(pclk > 0), d0, PASS(d0 > 0));
+
+  // 11. Frame timing with the driver's configuration.
+  frame_timing();
 
   // Leave the sensor in reset and MCLK off; cameraInit() resets it with MCLK running later.
   pin_drive(CAM_XSHUTDOWN, 0);
