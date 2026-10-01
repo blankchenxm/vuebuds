@@ -47,6 +47,9 @@
 #define CAM_LINE_VALID                    NRF_GPIO_PIN_MAP(0, 11)  // Input
 #define CAM_INT                           NRF_GPIO_PIN_MAP(0, 9)   // Input
 #define CAM_MCLK_IN_FROM_MCU              NRF_GPIO_PIN_MAP(1, 8)
+// HM0360 only (not connected on HM01B0 boards); both active low, pulled up on the module.
+#define CAM_XSLEEP                        NRF_GPIO_PIN_MAP(1, 4)
+#define CAM_XSHUTDOWN                     NRF_GPIO_PIN_MAP(1, 5)
 
 // #define CAM_MCLK_IN_FROM_MCU              NRF_GPIO_PIN_MAP(0, 15)
 

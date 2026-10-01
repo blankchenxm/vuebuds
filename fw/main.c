@@ -221,6 +221,11 @@ static void mustardInit(void)
 
   i2cInit();
 
+#ifdef WIRING_TEST
+  extern void wiringTest(void);
+  wiringTest();
+#endif
+
   powerInit();
 
   bleInit();

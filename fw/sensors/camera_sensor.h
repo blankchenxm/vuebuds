@@ -57,8 +57,8 @@ typedef struct {
   ret_code_t (*get_mode_info)(camera_mode_t mode, camera_mode_info_t *info);
 } camera_sensor_t;
 
-/* Read the model ID over I2C and return the matching driver. MCLK must be running. */
-ret_code_t camera_sensor_detect(const camera_sensor_t **sensor);
+/* Poll the model ID over I2C until it matches a known driver or timeout_ms passes. MCLK must be running. */
+ret_code_t camera_sensor_detect(const camera_sensor_t **sensor, uint32_t timeout_ms);
 
 const char *camera_mode_name(camera_mode_t mode);
 
