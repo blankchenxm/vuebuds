@@ -7,7 +7,7 @@
 ## 设计文档(先读)
 
 - 迁移设计与 TODO:`C:\Users\blank\Documents\Obsidian Vault\Research\Proactive Wearable Agent\02-daily_raw\9.28~10.4\Vuebuds Hm0360迁移对比.md`
-  - §1 现有实现 · §1.2 / §3.1 接线表 · §1.6 RAM 预算 · §4 时钟结论 · §5 模式与帧环形缓存 · §6 重构结构 · §8 TODO
+  - §1 现有实现 · §1.2 / §3.1 接线表 · **§3.2 HM0360 实测特性与已知问题** · §1.6 RAM 预算 · §4 时钟结论 · §5 模式与帧环形缓存 · §6 重构结构 · §8 TODO
 - 背景:同目录 `01-synthesis/Hardware/HM01B0 vs HM0360.md`、`Camera持续采集Buffer问题.md`
 - 已定的决定,不要再推翻:
   - MCLK 由 nRF 提供 8 MHz(HM0360 不能用内部时钟跑 1-bit)。
