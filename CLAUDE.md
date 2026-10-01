@@ -8,7 +8,12 @@
 - 迁移设计与 TODO:`C:\Users\blank\Documents\Obsidian Vault\Research\Proactive Wearable Agent\02-daily_raw\9.28~10.4\Vuebuds Hm0360迁移对比.md`
   - §1 现有实现 · §1.2 / §3.1 接线表 · §1.6 RAM 预算 · §4 时钟结论 · §5 模式与帧环形缓存 · §6 重构结构 · §8 TODO
 - 背景:同目录 `01-synthesis/Hardware/HM01B0 vs HM0360.md`、`Camera持续采集Buffer问题.md`
-- 已定的决定,不要再推翻:MCLK 由 nRF 提供 8 MHz(HM0360 不能用内部时钟跑 1-bit);Monitor 用 S2;不开运动检测;不做触发/回传;不做 VGA;RAM 保持现状(RTT 保留,日志缓冲 16 KB、堆 8 KB 不缩小)。
+- 已定的决定,不要再推翻:
+  - MCLK 由 nRF 提供 8 MHz(HM0360 不能用内部时钟跑 1-bit)。
+  - 模式在编译时选(`CAM_MODE=QVGA/QQVGA`),**不做运行时切换**。
+  - DMA 收传感器完整输出(HM01B0 QVGA 324×244、QQVGA 162×122),**固件发 BLE 时裁成标准 320×240 / 160×120**;BLE 帧头带宽高。HM0360 用窗口模式 `0x3030[0]=1` 直接输出标准尺寸(笔记 §5.3)。
+  - **Monitor 只做 HM0360**,用 S2;不开运动检测;不做触发/回传;不做 VGA。
+  - RAM 保持现状(RTT 保留,日志缓冲 16 KB、堆 8 KB 不缩小)。
 
 ## 仓库结构
 
@@ -60,7 +65,7 @@
 
 ## TODO 各步的验收标准(笔记 §8)
 
-1. **重构,不改功能**:viewer 看到的画面与重构前一致(QVGA 324×239,画面无黑带/错位),FPS 约 0.7–0.9,0 丢包;`arm-none-eabi-size` 确认 .bss 少了约 77 KB;帧缓冲池由链接器分配到剩余 RAM。
-2. **HM01B0 QQVGA/QVGA 运行时切换**:viewer 按键切换,两种尺寸都正确显示且 0 丢包;彩条测试图在两种模式下都正确。
-3. **HM0360 上板**:I2C 读到 ID 0x0360;SPIS 收到的字节数等于 宽×高;彩条测试图正确;QQVGA 再 QVGA 真实画面正常。
-4. **Monitor(只做缓存)**:RTT 日志显示槽号循环、帧序号连续、时间戳间隔符合 RTC 周期;QQVGA 10 槽、QVGA 2 槽;HM0360 帧间 XSLEEP 为低、MCLK 关闭。
+1. **重构(HM01B0)**:viewer 看到**标准 320×240** 画面(DMA 收完整 324×244,发送时裁剪),无黑带/错位;FPS 约 0.7–0.9;0 丢包;BLE 帧头带宽高,viewer 按帧头适配;`arm-none-eabi-size` 确认 .bss 少了约 77 KB;帧缓冲池由链接器分配到剩余 RAM。注意画面和重构前不完全一样(左右少 2 列边框、底部不再缺 5 行),这是预期的。
+2. **编译时选模式(HM01B0)**:`CAM_MODE=QVGA` 和 `CAM_MODE=QQVGA` 两种编译结果都正确显示(320×240 / 160×120),彩条测试图正确,0 丢包。
+3. **HM0360 驱动 + 上板**:I2C 读到 ID 0x0360;彩条测试图下 SPIS 收到的字节数 = 宽×高(验证 PCLKO = 8 MHz);QQVGA 再 QVGA 真实画面正常;viewer 看到的尺寸和 HM01B0 一样。
+4. **HM0360 Monitor(只做缓存)**:RTT 日志显示槽号循环、帧序号连续、时间戳间隔符合 RTC 周期;QQVGA 10 槽、QVGA 2 槽;帧间 XSLEEP 为低、MCLK 关闭。
