@@ -18,10 +18,31 @@
 
 #define CAMERA_POR_DELAY_MS 100
 #define CAMERA_STANDBY_DELAY_MS 5
+#define CAMERA_XSHUTDOWN_LOW_MS 10
+// Datasheet table 6.2: >= 200 us from reset release to XSLEEP, >= 10 us to the first I2C command.
+// Measured: the ID reads back right away; detection polls anyway.
+#define CAMERA_BOOT_DELAY_MS 1
+#define CAMERA_DETECT_TIMEOUT_MS 1000
 
 static bool cameraInitialized = false;
 static const camera_sensor_t *sensor = NULL;
 static camera_mode_info_t modeInfo;
+
+/*
+ * Reset the HM0360 through XSHUTDOWN with MCLK already running, so it always starts
+ * from a clean state (gpioInit() holds it in reset until here), and keep XSLEEP high.
+ * Both pins are unconnected on HM01B0 boards.
+ */
+static void cameraHardwareReset(void)
+{
+  nrf_gpio_cfg_output(CAM_XSLEEP);
+  nrf_gpio_pin_set(CAM_XSLEEP);
+  nrf_gpio_cfg_output(CAM_XSHUTDOWN);
+  nrf_gpio_pin_clear(CAM_XSHUTDOWN);
+  delayMs(CAMERA_XSHUTDOWN_LOW_MS);
+  nrf_gpio_pin_set(CAM_XSHUTDOWN);
+  delayMs(CAMERA_BOOT_DELAY_MS);
+}
 
 void cameraInit(void)
 {
@@ -33,8 +54,9 @@ void cameraInit(void)
   // The sensor runs from our MCLK, including its I2C slave, so start it first.
   capture_mclk_init();
   delayMs(CAMERA_POR_DELAY_MS);
+  cameraHardwareReset();
 
-  if (camera_sensor_detect(&sensor) != NRF_SUCCESS) {
+  if (camera_sensor_detect(&sensor, CAMERA_DETECT_TIMEOUT_MS) != NRF_SUCCESS) {
     capture_mclk_enable(false);
     return;
   }

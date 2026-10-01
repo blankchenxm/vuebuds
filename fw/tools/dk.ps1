@@ -6,6 +6,7 @@
 #   .\tools\dk.ps1 run -Seconds 20    # build + flash + capture RTT
 #   .\tools\dk.ps1 camera -Frames 3   # reset, pull frames over BLE into _build_win\frames, show RTT log
 #   .\tools\dk.ps1 run -Mode QQVGA -ColorBar   # camera mode / color bar test pattern (build, flash, run)
+#   .\tools\dk.ps1 run -WiringTest            # HM0360 wiring / state check (wiring_test.c), prints PASS/FAIL
 param(
   [Parameter(Position = 0)][ValidateSet('build', 'flash-sd', 'flash', 'rtt', 'run', 'camera', 'erase')]
   [string]$Command = 'run',
@@ -13,6 +14,7 @@ param(
   [int]$Frames = 3,
   [ValidateSet('QVGA', 'QQVGA')][string]$Mode = 'QVGA',
   [switch]$ColorBar,
+  [switch]$WiringTest,
   [switch]$NoLog
 )
 
@@ -23,6 +25,7 @@ $OutDir = '_build_win'
 if ($NoLog) { $OutDir += '_nolog' }
 if ($Mode -ne 'QVGA') { $OutDir += '_' + $Mode.ToLower() }
 if ($ColorBar) { $OutDir += '_colorbar' }
+if ($WiringTest) { $OutDir += '_wiring' }
 $Hex = Join-Path $FwDir "$OutDir\banji_dev.hex"
 $SdHex = Join-Path $FwDir 'sdk\components\softdevice\s140\hex\s140_nrf52_7.2.0_softdevice.hex'
 $RttLog = Join-Path $FwDir '_build_win\rtt.log'
@@ -44,7 +47,8 @@ function Invoke-Build {
   $rtt = if ($NoLog) { '' } else { 'RTT_LOG=1' }
   $pattern = if ($ColorBar) { 'CAM_TEST_PATTERN=COLOR_BAR' } else { '' }
   $fw = $FwDir -replace '\\', '/'
-  $cmd = "cd '$fw' && make banji_dev OUTPUT_DIRECTORY=$OutDir GNU_INSTALL_ROOT=$gcc/ CAM_MODE=$Mode $pattern $rtt -j8"
+  $extra = if ($WiringTest) { 'CFLAGS=-DWIRING_TEST ' } else { '' }
+  $cmd = "cd '$fw' && ${extra}make banji_dev OUTPUT_DIRECTORY=$OutDir GNU_INSTALL_ROOT=$gcc/ CAM_MODE=$Mode $pattern $rtt -j8"
   & $GitBash -lc $cmd
   if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)" }
 }

@@ -90,6 +90,7 @@ SRC_FILES += \
 	$(PROJ_DIR)/$(wildcard *.c) \
 	$(wildcard $(PROJ_DIR)/sensors/*.c) \
 	$(wildcard $(PROJ_DIR)/sensors/hm01b0/*.c) \
+	$(wildcard $(PROJ_DIR)/sensors/hm0360/*.c) \
 	$(wildcard $(PROJ_DIR)/capture/*.c) \
 	$(PROJ_DIR)/$(wildcard bmi270/*.c) \
 	$(SDK_ROOT)/external/segger_rtt/SEGGER_RTT.c \
@@ -199,6 +200,7 @@ INC_FOLDERS += \
 	$(PROJ_DIR)/config \
 	$(PROJ_DIR)/sensors \
 	$(PROJ_DIR)/sensors/hm01b0/include \
+	$(PROJ_DIR)/sensors/hm0360/include \
 	$(PROJ_DIR)/capture \
 	$(PROJ_DIR)/bmi270 \
 	$(PROJ_DIR) \
