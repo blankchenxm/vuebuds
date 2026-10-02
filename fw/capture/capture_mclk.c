@@ -69,6 +69,11 @@ void capture_mclk_enable(bool enable)
   }
 }
 
+bool capture_mclk_running(void)
+{
+  return m_initialized && nrf_drv_timer_is_enabled(&m_mclk_timer);
+}
+
 void capture_mclk_shutdown(void)
 {
   if (!m_initialized) {

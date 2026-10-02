@@ -5,6 +5,33 @@
 
 ---
 
+## 2026-10-02 · HM0360 Monitor:RTC2 周期 S2 唤醒,帧写进环形缓存(PR #?,Issue #15)
+
+- **阶段**:TODO 第 4 步(HM0360 Monitor,只做缓存)
+- **改了什么**:
+  - 新增 `fw/monitor.{c,h}`:
+    - RTC2(nrfx 驱动,32.768 kHz)每 `MONITOR_PERIOD_MS`(默认 500)ms 产生一次中断,经事件队列交给主循环:开 MCLK → XSLEEP 高 → 采集层写入最旧的槽,先跳过 `MONITOR_SKIP_FRAMES`(默认 1)帧 → 采集完成后 XSLEEP 低 → 关 MCLK → 标记这个槽就绪(帧序号、时间戳、DMA 是否正确)。
+    - 不是 HM0360 就不启动;上一帧还没完成时再次唤醒,记一次 overrun 并跳过。
+  - `fw/capture/`:新增 `capture_arm_slot(slot, skip_frames)`,`capture_arm()` 改为调用 `capture_arm_slot(0, 0)`;统计里新增 `ok`(各段字节数正确且无溢出)和 `arm_to_fvld_us`;新增 `capture_mclk_running()`。
+  - `fw/camera.c`:新增 `cameraSensorStream()`、`cameraSleep()`(XSLEEP 低 → 100 µs → 关 MCLK / 开 MCLK → 100 µs → XSLEEP 高)、`cameraArmSlot()`、`cameraSlotFrame()`、`cameraModelId()`、`cameraSlotCount()` 等。
+  - `fw/main.c`:`CAMERA_APP_MONITOR` 时开机放入 `EVENT_MONITOR_START`;`EVENT_MONITOR_WAKE` → `monitorWake()`;采集完成 → `monitorFrameDone()`(不发 BLE);收到 0xB1 只打日志。`fw/event.h` 新增两个事件。
+  - `fw/Makefile`:`CAM_APP=STREAM|MONITOR`,可选 `MONITOR_PERIOD_MS`、`MONITOR_SKIP_FRAMES`;`tools/dk.ps1` 新增 `-Monitor`。
+- **为什么**:笔记 §5.2 / §8 第 4 步。用户确认的选择:编译时开关、开机自动开始、周期 500 ms、每次唤醒固定跳过 1 帧。
+- **和原代码的行为差异**:默认的 `CAM_APP=STREAM` 编译下,推流行为不变(`capture_arm()` 仍然写槽 0、不跳帧;中断里只多了一次计时和一个字节数检查)。Monitor 是新功能。
+- **验证**(DK SN 1050291681 + HM0360):
+  - **QQVGA**:槽号 0→9→0 循环,帧序号连续,间隔约 497.5 ms,每帧 DMA 正确,每次唤醒前 XSLEEP 为低、MCLK 关闭;唤醒 → 第一个 FVLD 77 ms,唤醒 → 存完 195 ms。
+  - **QVGA**:槽号 0↔1 交替,帧序号连续(1–27),间隔约 498 ms,每帧两段 DMA 正确,XSLEEP 低 / MCLK 关;唤醒 → 第一个 FVLD 131 ms,唤醒 → 存完 339 ms。
+  - 用 J-Link 把帧缓冲池读出来看画面:QQVGA 10 个槽、QVGA 槽 0 都是完整的正常画面。运行中直接读会读到"清零后还没收完"的槽,要先暂停 CPU。
+  - 推流回归(`CAM_APP=STREAM` QVGA):两次 20 帧 0 错位、0 丢包。帧率 0.70 fps,但同时间段 `main` 也是 0.69–0.70,属于 BLE 环境波动,不是这次改动造成的。
+- **发现**:
+  - **XSLEEP 唤醒后约 1.3 个帧周期才出第一个 FVLD**(QQVGA 77 ms、QVGA 131 ms),看起来传感器醒来后内部先跑约一帧。加上跳过的 1 帧和存下的 1 帧,每次唤醒 MCLK 要开 195 / 339 ms,在 500 ms 周期里占 39%(QQVGA)/ 68%(QVGA)。
+  - QVGA 刚启动时第一次唤醒用了 542 ms,超过 500 ms 周期,第二次唤醒记了 1 次 overrun,之后正常。
+  - 日志时间戳用的是系统定时器(内部 RC 振荡器),RTC2 用的是 32.768 kHz 晶振,两者差约 0.5%,所以间隔显示为 497–498 ms。
+- **遗留 / 下一步**:
+  - 降低 MCLK 开启时间的方向:不跳帧(要先验证唤醒后第一帧的曝光)、缩短唤醒等待、用 RTC → PPI → GPIOTE 由硬件翻转 XSLEEP。
+  - QVGA 段间错位(Issue #13)在 Monitor 里同样可能发生,槽的 `ok` 标志会把它标出来。
+  - 触发和回传、读出缓存的帧:按计划以后再做。
+
 ## 2026-10-01 · HM0360 驱动 + 上板:QVGA / QQVGA 出图,S2 唤醒预验证(PR #14,Issue #12)
 
 - **阶段**:TODO 第 3 步(HM0360 驱动 + 上板)

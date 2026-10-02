@@ -46,6 +46,7 @@
 #include "flash.h"
 #include "cli.h"
 #include "camera.h"
+#include "monitor.h"
 #include "main.h"
 #include "pmu.h"
 #include "boards.h"
@@ -232,6 +233,10 @@ static void mustardInit(void)
   bleAdvertisingStart();
 
   NRF_LOG_RAW_INFO("%08d [mustard] booted\n", systemTimeGetMs());
+
+#ifdef CAMERA_APP_MONITOR
+  eventQueuePush(EVENT_MONITOR_START);
+#endif
 }
 
 static void processQueue(void)
@@ -252,6 +257,10 @@ static void processQueue(void)
 
       case EVENT_CAMERA_STREAM_START:
       {
+#ifdef CAMERA_APP_MONITOR
+        NRF_LOG_RAW_INFO("%08d [main] Monitor build: BLE streaming is disabled\n", systemTimeGetMs());
+        break;
+#endif
         cameraInit();
         cameraStartStream();
 
@@ -279,6 +288,10 @@ static void processQueue(void)
 
       case EVENT_CAMERA_CAPTURE_DONE:
       {
+#ifdef CAMERA_APP_MONITOR
+        monitorFrameDone();
+        break;
+#endif
         NRF_LOG_RAW_INFO("%08d [cam] EVENT_CAMERA_CAPTURE_DONE\n", systemTimeGetMs());
         camera_frame_t frame;
         if (cameraGetFrame(&frame)) {
@@ -354,6 +367,16 @@ static void processQueue(void)
       case EVENT_POWER_ENTER_SLEEP_MODE:
         powerEnterSleepMode();
         break;
+
+#ifdef CAMERA_APP_MONITOR
+      case EVENT_MONITOR_START:
+        monitorStart();
+        break;
+
+      case EVENT_MONITOR_WAKE:
+        monitorWake();
+        break;
+#endif
 
       case EVENT_STOP_SENSORS:
         cameraEnableStandbyMode(true);

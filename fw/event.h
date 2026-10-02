@@ -31,6 +31,8 @@ typedef enum
   EVENT_IMU_SAMPLE_DATA,
   EVENT_IMU_DATA_READY,
   EVENT_STOP_SENSORS,
+  EVENT_MONITOR_START,
+  EVENT_MONITOR_WAKE,
 } event_t;
 
 void    eventQueueInit(void);
