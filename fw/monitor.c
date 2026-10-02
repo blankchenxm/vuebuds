@@ -11,10 +11,11 @@
 #include "timers.h"
 #include "monitor.h"
 
+// 0: no RTC, every frame is stored (the next slot is armed as soon as one is done).
 #ifndef MONITOR_PERIOD_MS
 #define MONITOR_PERIOD_MS 500
 #endif
-// Frames to let pass after each wake before the one that is stored (user choice: 1).
+// Frames to let pass after each HM0360 wake before the one that is stored (user choice: 1).
 #ifndef MONITOR_SKIP_FRAMES
 #define MONITOR_SKIP_FRAMES 1
 #endif
@@ -35,7 +36,6 @@ typedef struct {
   slot_state_t state;
   uint32_t seq;       // frame number, counting from 1
   uint32_t time_ms;   // when the frame was complete
-  bool ok;            // DMA byte counts right, no overflow
 } monitor_slot_t;
 
 static const nrfx_rtc_t m_rtc = NRFX_RTC_INSTANCE(2);
@@ -46,6 +46,7 @@ static uint32_t m_slot_count;
 static uint32_t m_next;        // oldest slot, written by the next frame
 static uint32_t m_seq;
 static bool m_running;
+static bool m_s2;              // HM0360: S2 sleep between frames; HM01B0: MCLK and sensor always on
 static bool m_busy;            // a wake is in progress (sensor awake, slot armed)
 static uint32_t m_wake_ms;
 static uint32_t m_overruns;
@@ -83,30 +84,43 @@ static uint32_t frame_mean(uint32_t slot)
 void monitorStart(void)
 {
   cameraInit();
-  if (cameraModelId() != HM0360_MODEL_ID) {
-    NRF_LOG_RAW_INFO("[mon] not started: Monitor needs an HM0360 (found model id 0x%04X)\n", cameraModelId());
+  if (cameraModelId() == 0) {
+    NRF_LOG_RAW_INFO("[mon] not started: no camera sensor found\n");
     return;
   }
+  m_s2 = (cameraModelId() == HM0360_MODEL_ID);
 
   m_slot_count = cameraSlotCount();
   if (m_slot_count > MONITOR_MAX_SLOTS) {
     m_slot_count = MONITOR_MAX_SLOTS;
   }
 
-  // Sensor streams from here on; S2 gates it with XSLEEP and MCLK only.
+  // Sensor streams from here on. HM0360: S2 gates it with XSLEEP and MCLK only.
+  // HM01B0 has no S2: it keeps streaming with MCLK on, a frame is stored when a slot is armed.
   cameraSensorStream();
-  cameraSleep(true);
+  if (m_s2) {
+    cameraSleep(true);
+  }
+  m_running = true;
 
+  NRF_LOG_RAW_INFO("%08d [mon] start: %s %s, %u slots, period %u ms,", systemTimeGetMs(),
+                   m_s2 ? "HM0360" : "HM01B0", cameraModeName(), m_slot_count, MONITOR_PERIOD_MS);
+  if (m_s2) {
+    NRF_LOG_RAW_INFO(" S2 sleep, skip %u frame(s)\n", MONITOR_SKIP_FRAMES);
+  } else {
+    NRF_LOG_RAW_INFO(" MCLK always on, no skip\n");
+  }
+
+  if (MONITOR_PERIOD_MS == 0) {
+    eventQueuePush(EVENT_MONITOR_WAKE);
+    return;
+  }
   nrfx_rtc_config_t config = NRFX_RTC_DEFAULT_CONFIG;
   config.prescaler = RTC_FREQ_TO_PRESCALER(RTC_HZ);
   APP_ERROR_CHECK(nrfx_rtc_init(&m_rtc, &config, rtc_handler));
   m_cc = (nrfx_rtc_counter_get(&m_rtc) + RTC_PERIOD_TICKS) & RTC_COUNTER_MASK;
   APP_ERROR_CHECK(nrfx_rtc_cc_set(&m_rtc, 0, m_cc, true));
   nrfx_rtc_enable(&m_rtc);
-  m_running = true;
-
-  NRF_LOG_RAW_INFO("%08d [mon] start: HM0360 %s, %u slots, period %u ms, skip %u frame(s)\n",
-                   systemTimeGetMs(), cameraModeName(), m_slot_count, MONITOR_PERIOD_MS, MONITOR_SKIP_FRAMES);
 }
 
 void monitorWake(void)
@@ -121,15 +135,17 @@ void monitorWake(void)
     return;
   }
 
-  // State between frames, for the acceptance check (expected: XSLEEP low, MCLK off).
+  // State between frames, for the acceptance check (HM0360 expected: XSLEEP low, MCLK off).
   m_was_asleep = cameraIsAsleep();
   m_mclk_was_on = capture_mclk_running();
 
   m_wake_ms = systemTimeGetMs();
   m_slots[m_next].state = SLOT_WRITING;
   m_busy = true;
-  cameraArmSlot(m_next, MONITOR_SKIP_FRAMES);
-  cameraSleep(false);
+  cameraArmSlot(m_next, m_s2 ? MONITOR_SKIP_FRAMES : 0);
+  if (m_s2) {
+    cameraSleep(false);
+  }
 }
 
 void monitorFrameDone(void)
@@ -137,24 +153,30 @@ void monitorFrameDone(void)
   if (!m_busy) {
     return;
   }
-  cameraSleep(true);
+  if (m_s2) {
+    cameraSleep(true);
+  }
 
   const capture_stats_t *stats = capture_stats();
   uint32_t now = systemTimeGetMs();
   monitor_slot_t *slot = &m_slots[m_next];
+  m_busy = false;
+  if (MONITOR_PERIOD_MS == 0) {
+    eventQueuePush(EVENT_MONITOR_WAKE);  // continuous: arm the next slot right after this frame
+  }
+
   if (!stats->ok) {
     // Bad frame (wrong DMA byte count / overflow): not stored; the next wake rewrites this slot.
     slot->state = SLOT_EMPTY;
     m_dropped++;
-    NRF_LOG_RAW_INFO("%08d [mon] slot %u: BAD frame dropped (dma %u %u%s), %u dropped so far\n", now, m_next,
-                     stats->segment_bytes[0], stats->segment_bytes[1], stats->overflow ? " OVERFLOW" : "", m_dropped);
-    m_busy = false;
+    NRF_LOG_RAW_INFO("%08d [mon] slot %u: BAD frame dropped (%u us, dma %u %u%s),", now, m_next, stats->duration_us,
+                     stats->segment_bytes[0], stats->segment_bytes[1], stats->overflow ? " OVERFLOW" : "");
+    NRF_LOG_RAW_INFO(" %u dropped so far\n", m_dropped);
     return;
   }
   slot->state = SLOT_READY;
   slot->seq = ++m_seq;
   slot->time_ms = now;
-  slot->ok = stats->ok;
 
   // NRF_LOG takes at most 6 arguments per call.
   NRF_LOG_RAW_INFO("%08d [mon] slot %u seq %u: wake -> 1st FVLD %u ms -> done %u ms,", now, m_next, slot->seq,
@@ -163,5 +185,4 @@ void monitorFrameDone(void)
                    m_mclk_was_on ? "ON" : "off");
 
   m_next = (m_next + 1) % m_slot_count;
-  m_busy = false;
 }
