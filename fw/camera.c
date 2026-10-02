@@ -124,7 +124,11 @@ bool cameraGetFrame(camera_frame_t *frame)
   for (uint8_t i = 0; i < stats->segments; i++) {
     NRF_LOG_RAW_INFO(" %u", stats->segment_bytes[i]);
   }
-  NRF_LOG_RAW_INFO("%s\n", stats->overflow ? " OVERFLOW" : "");
+  NRF_LOG_RAW_INFO("%s%s\n", stats->overflow ? " OVERFLOW" : "", stats->ok ? "" : ", BAD, dropped");
+  if (!stats->ok) {
+    // Wrong byte count or overflow (a late CS edge shifted part of the frame): do not send it.
+    return false;
+  }
 
   frame->stride = modeInfo.transport_width;
   frame->width = modeInfo.standard.width;

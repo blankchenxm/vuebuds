@@ -296,6 +296,8 @@ static void processQueue(void)
         camera_frame_t frame;
         if (cameraGetFrame(&frame)) {
           bleSendFrame(frame.pixels, frame.stride, frame.width, frame.height);
+        } else {
+          eventQueuePush(EVENT_CAMERA_READY_NEXT_FRAME);  // bad frame: capture the next one instead
         }
         break;
       }

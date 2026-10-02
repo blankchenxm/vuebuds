@@ -49,6 +49,7 @@ static bool m_running;
 static bool m_busy;            // a wake is in progress (sensor awake, slot armed)
 static uint32_t m_wake_ms;
 static uint32_t m_overruns;
+static uint32_t m_dropped;     // bad frames not stored
 static bool m_was_asleep;      // XSLEEP low just before this wake
 static bool m_mclk_was_on;     // MCLK running just before this wake
 
@@ -141,6 +142,15 @@ void monitorFrameDone(void)
   const capture_stats_t *stats = capture_stats();
   uint32_t now = systemTimeGetMs();
   monitor_slot_t *slot = &m_slots[m_next];
+  if (!stats->ok) {
+    // Bad frame (wrong DMA byte count / overflow): not stored; the next wake rewrites this slot.
+    slot->state = SLOT_EMPTY;
+    m_dropped++;
+    NRF_LOG_RAW_INFO("%08d [mon] slot %u: BAD frame dropped (dma %u %u%s), %u dropped so far\n", now, m_next,
+                     stats->segment_bytes[0], stats->segment_bytes[1], stats->overflow ? " OVERFLOW" : "", m_dropped);
+    m_busy = false;
+    return;
+  }
   slot->state = SLOT_READY;
   slot->seq = ++m_seq;
   slot->time_ms = now;
@@ -149,8 +159,7 @@ void monitorFrameDone(void)
   // NRF_LOG takes at most 6 arguments per call.
   NRF_LOG_RAW_INFO("%08d [mon] slot %u seq %u: wake -> 1st FVLD %u ms -> done %u ms,", now, m_next, slot->seq,
                    stats->arm_to_fvld_us / 1000, now - m_wake_ms);
-  NRF_LOG_RAW_INFO(" mean %u, %s, before wake XSLEEP %s MCLK %s\n", frame_mean(m_next),
-                   slot->ok ? "ok" : "BAD (dma / overflow)", m_was_asleep ? "low" : "HIGH",
+  NRF_LOG_RAW_INFO(" mean %u, ok, before wake XSLEEP %s MCLK %s\n", frame_mean(m_next), m_was_asleep ? "low" : "HIGH",
                    m_mclk_was_on ? "ON" : "off");
 
   m_next = (m_next + 1) % m_slot_count;
