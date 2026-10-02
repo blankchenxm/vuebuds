@@ -303,8 +303,8 @@ else
 $(error CAM_MODE must be QVGA or QQVGA, got '$(CAM_MODE)')
 endif
 
-# Application: STREAM (default, BLE streaming on 0xB1) or MONITOR (HM0360 only: RTC-driven
-# S2 sleep/wake, frames cached in the frame pool, nothing sent). make banji_dev CAM_APP=MONITOR
+# Application: STREAM (default, BLE streaming on 0xB1) or MONITOR (frames cached in the frame pool,
+# HM0360: RTC-driven S2 sleep/wake; HM01B0: MCLK always on; nothing sent). make banji_dev CAM_APP=MONITOR
 CAM_APP ?= STREAM
 ifeq ($(CAM_APP),MONITOR)
 CFLAGS += -DCAMERA_APP_MONITOR
