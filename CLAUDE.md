@@ -82,7 +82,7 @@
 - **HM0360 从 XSLEEP 唤醒后约 1.3 个帧周期才出第一个 FVLD**(QQVGA 77 ms、QVGA 131 ms);Monitor 每次唤醒 MCLK 开 195 / 339 ms(跳 1 帧)。QVGA 刚启动的第一次唤醒约 540 ms,会记一次 overrun,正常。
 - 看 Monitor 存下的帧:J-Link `savebin <无空格路径>, <__frame_pool_start>, <长度>`,**先 `h` 暂停 CPU 再读**;运行中读会读到刚清零、还没收完的槽(顶部一截全 0)。读完 `nrfjprog --reset`。
 - 日志时间戳(`systemTimeGetMs`,TIMER1 跑在 HFCLK 上,没开 HFXO 时是内部 RC)比 RTC(32.768 kHz 晶振)快约 0.5%,所以 500 ms 的周期显示成 497–498 ms。
-- BLE 推流帧率会随环境波动(同一份固件 0.7–1.0 fps);比较前后两版时,要在同一时间段里交替跑。
+- **比较 BLE 帧率用 `host/ble_bench.py --board … --duration 40 --label … --csv logs/bench.csv`**,两版在同一时间段里交替跑(A B A B …),每版至少 3 次取平均。viewer 的 `last_fps` 只算最近 5 帧,噪声很大(一次 1.6 s 的间隔就从 1.0 掉到 0.86),看 `session_fps`。瓶颈在电脑端:连接间隔 7.5 ms 或 15 ms(Windows 每次连接自己选)都是约 310 包/s ≈ 1 fps(QVGA 318 包 / 帧);SoftDevice 通知队列从 1 加到 16 没有变化(PR #24)。
 - nRF52840 REV3 芯片出厂可能开着 APPROTECT,第一次用要 `nrfjprog --recover`(整片擦除)再 `dk.ps1 flash-sd`;目前复位 / 断电后没有再锁。
 - HM0360 datasheet:`D:\Projects\Proactive camera agent\HM0360.pdf`。Read 工具会误报"加密",用 pypdf 提取文字即可(图 6.4 时钟分频图在笔记里有截图)。
 - 传感器驱动结构参照 ESP32 驱动:GitHub `blankchenxm/hm01b0-esp-idf-driver` → `components/hm01b0/`(未克隆到本地,用 `gh api` 读)。

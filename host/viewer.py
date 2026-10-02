@@ -157,9 +157,19 @@ class BleReceiver:
 class FpsMeter:
     def __init__(self, window: int = 5):
         self._times = collections.deque(maxlen=window)
+        self._first = None  # (frame index, time) of the first frame, for the session mean
+        self._last = None
 
-    def tick(self, t: float):
+    def tick(self, t: float, index: int = 0):
         self._times.append(t)
+        self._first = self._first or (index, t)
+        self._last = (index, t)
+
+    def session_fps(self) -> float:
+        """Mean over the whole session, from the first frame on (excludes stream start-up)."""
+        if not self._first or self._last[1] <= self._first[1]:
+            return 0.0
+        return (self._last[0] - self._first[0]) / (self._last[1] - self._first[1])
 
     def fps(self) -> float:
         if len(self._times) < 2:
@@ -230,7 +240,7 @@ def main():
         while True:
             frame = rx.take_latest()
             if frame is not None:
-                fps.tick(frame.completed_at)
+                fps.tick(frame.completed_at, frame.index)
                 last_frame = frame
             if last_frame is not None:
                 img = np.frombuffer(last_frame.pixels, np.uint8).reshape(last_frame.height, last_frame.width)
@@ -265,7 +275,8 @@ def main():
             log("host", f"snapshot saved: {args.snapshot}")
         a = rx.assembler
         log("host", f"summary: frames={a.frames} packets={a.total_packets} lost={a.total_lost} "
-                    f"discarded_partial={a.discarded} last_fps={fps.fps():.2f}")
+                    f"discarded_partial={a.discarded} last_fps={fps.fps():.2f} (last 5 frames) "
+                    f"session_fps={fps.session_fps():.2f} (from frame 1)")
         rx.close()
         if rtt:
             rtt.close()
