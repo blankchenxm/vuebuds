@@ -303,6 +303,22 @@ else
 $(error CAM_MODE must be QVGA or QQVGA, got '$(CAM_MODE)')
 endif
 
+# Application: STREAM (default, BLE streaming on 0xB1) or MONITOR (HM0360 only: RTC-driven
+# S2 sleep/wake, frames cached in the frame pool, nothing sent). make banji_dev CAM_APP=MONITOR
+CAM_APP ?= STREAM
+ifeq ($(CAM_APP),MONITOR)
+CFLAGS += -DCAMERA_APP_MONITOR
+else ifneq ($(CAM_APP),STREAM)
+$(error CAM_APP must be STREAM or MONITOR, got '$(CAM_APP)')
+endif
+# Optional Monitor tuning (defaults in monitor.c: 500 ms, skip 1 frame per wake)
+ifneq ($(MONITOR_PERIOD_MS),)
+CFLAGS += -DMONITOR_PERIOD_MS=$(MONITOR_PERIOD_MS)
+endif
+ifneq ($(MONITOR_SKIP_FRAMES),)
+CFLAGS += -DMONITOR_SKIP_FRAMES=$(MONITOR_SKIP_FRAMES)
+endif
+
 # Optional sensor test pattern: make banji_dev CAM_TEST_PATTERN=COLOR_BAR (or WALKING_1)
 ifneq ($(CAM_TEST_PATTERN),)
 CFLAGS += -DCAMERA_TEST_PATTERN=CAMERA_TEST_PATTERN_$(CAM_TEST_PATTERN)
@@ -388,6 +404,7 @@ help:
 	@echo   banji      - build form factor
 	@echo		banji_dev  - build dev kit
 	@echo		  options: RTT_LOG=1  CAM_MODE=QVGA/QQVGA  CAM_TEST_PATTERN=COLOR_BAR/WALKING_1
+	@echo		           CAM_APP=STREAM/MONITOR  MONITOR_PERIOD_MS=500  MONITOR_SKIP_FRAMES=1
 	@echo		flash_softdevice - flash soft device
 	@echo		sdk_config - starting external tool for editing sdk_config.h
 	@echo		flash      - flashing form factor binary

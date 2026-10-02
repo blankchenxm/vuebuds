@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "nrf_log.h"
+#include "nrf_delay.h"
 #include "camera_sensor.h"
 #include "capture.h"
 #include "camera.h"
@@ -23,6 +24,7 @@
 // Measured: the ID reads back right away; detection polls anyway.
 #define CAMERA_BOOT_DELAY_MS 1
 #define CAMERA_DETECT_TIMEOUT_MS 1000
+#define CAMERA_XSLEEP_SETTLE_US 100  // >= 10 us from XSLEEP high to I2C (datasheet table 6.2)
 
 static bool cameraInitialized = false;
 static const camera_sensor_t *sensor = NULL;
@@ -149,4 +151,65 @@ void cameraEnableStandbyMode(bool standby)
     sensor->stream_start();
     currentStandby = false;
   }
+}
+
+uint16_t cameraModelId(void)
+{
+  return (cameraInitialized && sensor != NULL) ? sensor->model_id : 0;
+}
+
+const char *cameraModeName(void)
+{
+  return camera_mode_name(CAMERA_MODE);
+}
+
+uint32_t cameraSlotCount(void)
+{
+  return cameraInitialized ? frame_pool_slot_count() : 0;
+}
+
+void cameraSensorStream(void)
+{
+  if (!cameraInitialized) {
+    return;
+  }
+  capture_mclk_enable(true);
+  sensor->stream_start();
+}
+
+void cameraSleep(bool sleep)
+{
+  // HM0360 S2: MCLK runs whenever XSLEEP is high (datasheet: MCLK first, then XSLEEP).
+  if (sleep) {
+    nrf_gpio_pin_clear(CAM_XSLEEP);
+    nrf_delay_us(CAMERA_XSLEEP_SETTLE_US);
+    capture_mclk_enable(false);
+  } else {
+    capture_mclk_enable(true);
+    nrf_delay_us(CAMERA_XSLEEP_SETTLE_US);
+    nrf_gpio_pin_set(CAM_XSLEEP);
+  }
+}
+
+bool cameraIsAsleep(void)
+{
+  return nrf_gpio_pin_out_read(CAM_XSLEEP) == 0;
+}
+
+void cameraArmSlot(uint32_t slot, uint8_t skipFrames)
+{
+  capture_arm_slot(slot, skipFrames);
+}
+
+bool cameraSlotFrame(uint32_t slot, camera_frame_t *frame)
+{
+  uint8_t *base = cameraInitialized ? frame_pool_slot(slot) : NULL;
+  if (base == NULL) {
+    return false;
+  }
+  frame->stride = modeInfo.transport_width;
+  frame->width = modeInfo.standard.width;
+  frame->height = modeInfo.standard.height;
+  frame->pixels = base + (uint32_t)modeInfo.standard.y * frame->stride + modeInfo.standard.x;
+  return true;
 }

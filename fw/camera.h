@@ -19,4 +19,14 @@ void cameraReadyNextFrame(void);
 bool cameraGetFrame(camera_frame_t *frame);
 void cameraEnableStandbyMode(bool);
 
+/* Monitor (HM0360) */
+uint16_t cameraModelId(void);              // 0 until cameraInit() found a sensor
+const char *cameraModeName(void);
+uint32_t cameraSlotCount(void);            // frame pool slots for the compiled mode
+void cameraSensorStream(void);             // MCLK on + sensor streaming, nothing armed
+void cameraSleep(bool sleep);              // S2: XSLEEP low then MCLK off / MCLK on then XSLEEP high
+bool cameraIsAsleep(void);                 // XSLEEP driven low
+void cameraArmSlot(uint32_t slot, uint8_t skipFrames);
+bool cameraSlotFrame(uint32_t slot, camera_frame_t *frame);
+
 #endif

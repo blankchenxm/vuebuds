@@ -30,22 +30,28 @@ static uint16_t m_seg_rows;  // lines per segment; the last one may be shorter
 
 // Shared with the GPIOTE / SPIS / timer interrupts
 static volatile bool m_in_frame;
+static volatile uint8_t m_skip;            // frames still to let pass before capturing
+static volatile bool m_skipping;           // the current frame is one of them (no CS, no DMA)
+static volatile bool m_seen_fvld;          // an FVLD rise happened since arming
+static volatile uint32_t m_armed_us;
 static volatile uint16_t m_lines;          // LVLD falling edges since FVLD rose
 static volatile uint16_t m_next_boundary;  // LVLD count at which CS is pulsed
 static volatile uint8_t m_seg;
 static volatile uint32_t m_frame_start_us;
 static capture_stats_t m_stats;
 
+static uint32_t segment_lines(uint8_t seg)
+{
+  uint32_t lines = m_rx_lines - (uint32_t)seg * m_seg_rows;
+  return (lines > m_seg_rows) ? m_seg_rows : lines;
+}
+
 static void set_segment_buffer(uint8_t seg)
 {
   uint32_t first = (uint32_t)seg * m_seg_rows;
-  uint32_t lines = m_rx_lines - first;
-  if (lines > m_seg_rows) {
-    lines = m_seg_rows;
-  }
   APP_ERROR_CHECK(nrfx_spis_buffers_set(&m_spis, m_tx_dummy, 0,
                                         m_slot + (m_info.first_line + first) * m_info.transport_width,
-                                        lines * m_info.transport_width));
+                                        segment_lines(seg) * m_info.transport_width));
 }
 
 static void spis_handler(nrf_drv_spis_event_t event)
@@ -67,6 +73,11 @@ static void spis_handler(nrf_drv_spis_event_t event)
   if (seg < m_seg_count) {
     set_segment_buffer(seg);
   } else {
+    bool ok = !m_stats.overflow;
+    for (uint8_t i = 0; i < m_seg_count; i++) {
+      ok = ok && (m_stats.segment_bytes[i] == segment_lines(i) * m_info.transport_width);
+    }
+    m_stats.ok = ok;
     m_stats.duration_us = (uint32_t)systemTimeGetUs() - m_frame_start_us;
     m_stats.frame++;
     eventQueuePush(EVENT_CAMERA_CAPTURE_DONE);
@@ -100,6 +111,16 @@ static void frame_valid_handler(nrf_drv_gpiote_pin_t pin, nrf_gpiote_polarity_t 
   if (nrf_gpio_pin_read(CAM_FRAME_VALID)) {
     if (!m_in_frame) {
       m_in_frame = true;
+      if (!m_seen_fvld) {
+        m_seen_fvld = true;
+        m_stats.arm_to_fvld_us = (uint32_t)systemTimeGetUs() - m_armed_us;
+      }
+      if (m_skip > 0) {
+        // Let this frame pass: CS stays high, so SPIS receives nothing.
+        m_skip--;
+        m_skipping = true;
+        return;
+      }
       m_frame_start_us = (uint32_t)systemTimeGetUs();
       nrf_drv_timer_enable(&m_cs_timer);
       if (m_seg_count > 1) {
@@ -109,6 +130,9 @@ static void frame_valid_handler(nrf_drv_gpiote_pin_t pin, nrf_gpiote_polarity_t 
         nrf_drv_gpiote_in_event_enable(CAM_LINE_VALID, true);
       }
     }
+  } else if (m_in_frame && m_skipping) {
+    m_skipping = false;
+    m_in_frame = false;
   } else if (m_in_frame) {
     // A falling edge without a preceding rise (armed mid-frame) is ignored above.
     nrf_gpio_pin_set(CAM_SPI_CS_OUT);
@@ -188,6 +212,18 @@ void capture_uninit(void)
 
 void capture_arm(void)
 {
+  capture_arm_slot(0, 0);
+}
+
+void capture_arm_slot(uint32_t slot, uint8_t skip_frames)
+{
+  m_slot = frame_pool_slot(slot);
+  APP_ERROR_CHECK_BOOL(m_slot != NULL);
+  m_skip = skip_frames;
+  m_skipping = false;
+  m_seen_fvld = false;
+  m_armed_us = (uint32_t)systemTimeGetUs();
+  m_stats.ok = false;
   m_seg = 0;
   m_stats.overflow = false;
   memset(m_stats.segment_bytes, 0, sizeof(m_stats.segment_bytes));

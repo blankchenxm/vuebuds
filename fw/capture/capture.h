@@ -25,7 +25,9 @@ typedef struct {
   uint8_t segments;
   uint32_t segment_bytes[CAPTURE_MAX_SEGMENTS];  // bytes DMA received per segment
   bool overflow;           // SPIS dropped bytes because a segment buffer was full
+  bool ok;                 // every segment got exactly its lines and nothing overflowed
   uint32_t duration_us;    // FVLD rise to last segment done
+  uint32_t arm_to_fvld_us; // arming to the first FVLD rise (incl. skipped frames)
 } capture_stats_t;
 
 /* MCLK (TIMER3 + PPI + GPIOTE). init also starts the clock. */
@@ -46,8 +48,12 @@ void capture_uninit(void);
 /* Arm reception of the next frame into slot 0; the frame starts at the next FVLD rise. */
 void capture_arm(void);
 
-/* Slot 0 holding the last completed frame (transport_width x transport_height). */
+/* Arm reception into a given pool slot, letting skip_frames whole frames pass first. */
+void capture_arm_slot(uint32_t slot, uint8_t skip_frames);
+
+/* The slot last armed, holding the last completed frame (transport_width x transport_height). */
 uint8_t *capture_frame(void);
+bool capture_mclk_running(void);
 const capture_stats_t *capture_stats(void);
 
 #endif /* CAPTURE_H_ */
