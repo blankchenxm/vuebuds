@@ -4,7 +4,10 @@
  *
  *   FVLD rise  -> TIMER4, after fvld_to_cs_us CS low -> DMA segment 0 from first_line
  *   LVLD fall  -> at each segment boundary, CS high/low -> next DMA segment
- *   FVLD fall  -> CS high -> last segment done -> EVENT_CAMERA_CAPTURE_DONE
+ *   last line  -> TIMER2 counts LVLD falls via PPI; at transport_height lines CS high
+ *                 -> last segment done -> EVENT_CAMERA_CAPTURE_DONE
+ *   FVLD fall  -> fallback end (VueBuds ended here; HM0360 FVLD falls 13 ms after the
+ *                 last line and only 54-65 us before the next frame)
  *
  * This is the VueBuds timing; on HM01B0 the CS delay skips line 0 on purpose.
  * EasyDMA moves at most 65,535 bytes per transfer, so the received lines are split
@@ -26,6 +29,7 @@ typedef struct {
   uint32_t segment_bytes[CAPTURE_MAX_SEGMENTS];  // bytes DMA received per segment
   bool overflow;           // SPIS dropped bytes because a segment buffer was full
   bool ok;                 // every segment got exactly its lines and nothing overflowed
+  bool ended_by_line_count; // ended after the last line (false: by the FVLD fall fallback)
   uint32_t duration_us;    // FVLD rise to last segment done
   uint32_t arm_to_fvld_us; // arming to the first FVLD rise (incl. skipped frames)
 } capture_stats_t;

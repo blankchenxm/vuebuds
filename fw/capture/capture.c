@@ -4,6 +4,7 @@
 #include "nrf_drv_spis.h"
 #include "nrfx_spis_patch.h"
 #include "nrf_drv_timer.h"
+#include "nrf_drv_ppi.h"
 #include "nrf_delay.h"
 #include "app_error.h"
 #include "nrf_log.h"
@@ -20,6 +21,10 @@
 static nrfx_spis_t m_spis = NRF_DRV_SPIS_INSTANCE(SPIS_INSTANCE);
 // Asserts CS fvld_to_cs_us after FVLD rises (VueBuds' "LVLD timer").
 static const nrf_drv_timer_t m_cs_timer = NRF_DRV_TIMER_INSTANCE(4);
+// Counts LVLD falling edges in hardware (PPI), cleared on every FVLD edge; its compare
+// ends the capture after the last line, without waiting for FVLD to fall.
+// (TIMER2 would also be used by the UART CLI, whose cliInit() is not called.)
+static const nrf_drv_timer_t m_line_counter = NRF_DRV_TIMER_INSTANCE(2);
 
 static uint8_t m_tx_dummy[1];
 static camera_mode_info_t m_info;
@@ -90,6 +95,29 @@ static void cs_timer_handler(nrf_timer_event_t event_type, void *p_context)
   nrf_drv_timer_disable(&m_cs_timer);
 }
 
+// Interrupt only for LVLD (segment boundaries); its event keeps feeding the line counter.
+static void line_valid_irq(bool enable)
+{
+  uint32_t channel = (nrf_drv_gpiote_in_event_addr_get(CAM_LINE_VALID) - (uint32_t)&NRF_GPIOTE->EVENTS_IN[0]) / 4;
+  if (enable) {
+    nrf_drv_gpiote_in_event_enable(CAM_LINE_VALID, true);
+  } else {
+    nrf_gpiote_int_disable(1UL << channel);
+  }
+}
+
+// The last line of the frame has ended: end the last DMA segment now. On HM0360 FVLD
+// only falls ~13 ms later (36 blank lines), with just 54-65 us before the next frame.
+static void line_counter_handler(nrf_timer_event_t event_type, void *p_context)
+{
+  if (m_in_frame && !m_skipping) {
+    nrf_gpio_pin_set(CAM_SPI_CS_OUT);
+    nrf_drv_gpiote_in_event_disable(CAM_FRAME_VALID);
+    m_in_frame = false;
+    m_stats.ended_by_line_count = true;
+  }
+}
+
 static void line_valid_handler(nrf_drv_gpiote_pin_t pin, nrf_gpiote_polarity_t action)
 {
   // End of a line. At a segment boundary, pulse CS so SPIS ends the current
@@ -101,7 +129,7 @@ static void line_valid_handler(nrf_drv_gpiote_pin_t pin, nrf_gpiote_polarity_t a
     nrf_gpio_pin_clear(CAM_SPI_CS_OUT);
     m_next_boundary += m_seg_rows;
     if (m_next_boundary >= m_info.transport_height) {
-      nrf_drv_gpiote_in_event_disable(CAM_LINE_VALID);
+      line_valid_irq(false);
     }
   }
 }
@@ -127,13 +155,14 @@ static void frame_valid_handler(nrf_drv_gpiote_pin_t pin, nrf_gpiote_polarity_t 
         // LVLD edges count from line 0, including the lines skipped before CS.
         m_lines = 0;
         m_next_boundary = m_info.first_line + m_seg_rows;
-        nrf_drv_gpiote_in_event_enable(CAM_LINE_VALID, true);
+        line_valid_irq(true);
       }
     }
   } else if (m_in_frame && m_skipping) {
     m_skipping = false;
     m_in_frame = false;
   } else if (m_in_frame) {
+    // Fallback only: the line counter normally ends the frame first.
     // A falling edge without a preceding rise (armed mid-frame) is ignored above.
     nrf_gpio_pin_set(CAM_SPI_CS_OUT);
     nrf_drv_gpiote_in_event_disable(CAM_FRAME_VALID);
@@ -187,6 +216,30 @@ void capture_init(const camera_mode_info_t *info)
                                  nrf_drv_timer_us_to_ticks(&m_cs_timer, m_info.fvld_to_cs_us),
                                  NRF_TIMER_SHORT_COMPARE4_CLEAR_MASK, true);
 
+  // Line counter: LVLD fall -> COUNT, any FVLD edge -> CLEAR, both through PPI.
+  nrf_drv_timer_config_t counter_cfg = NRF_DRV_TIMER_DEFAULT_CONFIG;
+  counter_cfg.mode = NRF_TIMER_MODE_COUNTER;
+  counter_cfg.bit_width = NRF_TIMER_BIT_WIDTH_16;
+  err_code = nrf_drv_timer_init(&m_line_counter, &counter_cfg, line_counter_handler);
+  APP_ERROR_CHECK(err_code);
+  // LVLD edges count from line 0, so the last line ends at transport_height.
+  nrf_drv_timer_extended_compare(&m_line_counter, NRF_TIMER_CC_CHANNEL0, m_info.transport_height, 0, true);
+
+  err_code = nrf_drv_ppi_init();
+  if (err_code != NRF_ERROR_MODULE_ALREADY_INITIALIZED) {
+    APP_ERROR_CHECK(err_code);
+  }
+  nrf_ppi_channel_t ppi_count, ppi_clear;
+  APP_ERROR_CHECK(nrf_drv_ppi_channel_alloc(&ppi_count));
+  APP_ERROR_CHECK(nrf_drv_ppi_channel_assign(ppi_count, nrf_drv_gpiote_in_event_addr_get(CAM_LINE_VALID),
+                                             nrf_drv_timer_task_address_get(&m_line_counter, NRF_TIMER_TASK_COUNT)));
+  APP_ERROR_CHECK(nrf_drv_ppi_channel_enable(ppi_count));
+  APP_ERROR_CHECK(nrf_drv_ppi_channel_alloc(&ppi_clear));
+  APP_ERROR_CHECK(nrf_drv_ppi_channel_assign(ppi_clear, nrf_drv_gpiote_in_event_addr_get(CAM_FRAME_VALID),
+                                             nrf_drv_timer_task_address_get(&m_line_counter, NRF_TIMER_TASK_CLEAR)));
+  APP_ERROR_CHECK(nrf_drv_ppi_channel_enable(ppi_clear));
+  nrf_drv_timer_enable(&m_line_counter);
+
   nrfx_spis_config_t spis_config = {
     .miso_pin = NRFX_SPIS_PIN_NOT_USED,
     .mosi_pin = CAM_D0,
@@ -207,6 +260,7 @@ void capture_uninit(void)
 {
   nrfx_spis_uninit(&m_spis);
   nrf_drv_timer_disable(&m_cs_timer);
+  nrf_drv_timer_disable(&m_line_counter);
   capture_mclk_shutdown();
 }
 
@@ -224,6 +278,7 @@ void capture_arm_slot(uint32_t slot, uint8_t skip_frames)
   m_seen_fvld = false;
   m_armed_us = (uint32_t)systemTimeGetUs();
   m_stats.ok = false;
+  m_stats.ended_by_line_count = false;
   m_seg = 0;
   m_stats.overflow = false;
   memset(m_stats.segment_bytes, 0, sizeof(m_stats.segment_bytes));
@@ -231,6 +286,7 @@ void capture_arm_slot(uint32_t slot, uint8_t skip_frames)
   // Zero the slot so lines DMA never wrote (line 0, or a short frame) are black, not stale.
   memset(m_slot, 0, (uint32_t)m_info.transport_width * m_info.transport_height);
   set_segment_buffer(0);
+  nrf_drv_gpiote_in_event_enable(CAM_LINE_VALID, false);  // events for the line counter, no interrupt
   nrf_drv_gpiote_in_event_enable(CAM_FRAME_VALID, true);
 }
 

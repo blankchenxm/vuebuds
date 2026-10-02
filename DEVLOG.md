@@ -5,6 +5,21 @@
 
 ---
 
+## 2026-10-02 · 问题 1(方案 E):数到最后一行就结束采集,不等 FVLD↓(PR #26,Issue #25)
+
+- **阶段**:修 bug(Issue #13 的第二种现象)
+- **改了什么**:
+  - `fw/capture/capture.c`:新增硬件行计数器 TIMER2(计数模式,16 位):PPI 把 LVLD 下降沿接到 COUNT、FVLD 每个边沿接到 CLEAR;CC[0] = `transport_height`,比较中断里拉高 CS 结束最后一段、关掉 FVLD 事件。FVLD↓ 仍是后备结束条件。LVLD 的 GPIOTE 事件从 arm 起一直开着(给计数器用),**中断**仍然只在分段边界附近打开(和原来一样)。
+  - `fw/capture/capture.h`:统计里新增 `ended_by_line_count`;开头的时序说明更新。
+  - `fw/camera.c`:由 FVLD↓ 结束的帧在 RTT 行末标 `(ended by FVLD)`。
+- **为什么**:HM0360 的 FVLD 在最后一行后还要高 13 ms(36 行空白),两帧之间只低 54–65 µs,FVLD↓ 中断被 SoftDevice 推迟就会晚一个帧周期才结束。按行数结束后,中断有 13 ms 的余量,Monitor 也能早 13 ms 关 MCLK。
+- **和原代码的行为差异**:VueBuds 原来在 FVLD↓ 中断里结束采集;现在最后一行结束就结束,多用了 TIMER2 和 2 个 PPI 通道、多一个 TIMER2 中断(每帧 1 次)。TIMER2 原本留给 UART CLI(libuarte),而 `cliInit()` 在原代码里就是注释掉的;以后要开 CLI 得换一个定时器。
+- **验证**(HM01B0 板):
+  - QVGA 推流 60 s:61 帧,耗时 91695 µs(原来 91705,提前约 10 µs,即 HM01B0 最后一行到 FVLD↓ 的时间),字节数正确,0.96 fps,0 丢包;1 帧由 FVLD 结束(数据正确:BLE 推迟中断时两个中断同时挂起,同优先级下 GPIOTE 中断号更小先执行)。
+  - QQVGA 推流 40 s:161 帧,26180 µs,3.78 fps,0 丢包;2 帧由 FVLD 结束。QQVGA Monitor 正常。
+  - **HM0360 还没测**(模块不响应 I2C,等硬件)。合并前要在 HM0360 上确认:QVGA 耗时约 90 ms(原来 103.7)、长时间推流不再出现耗时翻倍的帧、Monitor 每次唤醒少 13 ms。
+- **遗留 / 下一步**:HM0360 实测;问题 3。
+
 ## 2026-10-02 · 问题 4:BLE 帧率波动的来源 + 测量工具(PR #24,Issue #23)
 
 - **阶段**:工具 / 调查
