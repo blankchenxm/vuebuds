@@ -112,6 +112,14 @@ ret_code_t hm0360_init(camera_mode_t mode, camera_test_pattern_t pattern)
   RETURN_IF_ERROR(hm0360_set_test_pattern(pattern));
   RETURN_IF_ERROR(hm0360_set_mode(mode));
   RETURN_IF_ERROR(hm0360_set_interface(HM0360_DATA_INTERFACE_1_BIT));
+  // Wake-up experiments (problem 3): override the pre-meter set by the base table
+  // (0x3026 = 0x03: pre-meter at power-up and every wake-up; 0x3027 = 0x81: time limit 8).
+#ifdef HM0360_PMU_CFG_5
+  hm0360_reg_write(0x3026, HM0360_PMU_CFG_5);
+#endif
+#ifdef HM0360_PMU_CFG_6
+  hm0360_reg_write(0x3027, HM0360_PMU_CFG_6);
+#endif
   return NRF_SUCCESS;
 }
 

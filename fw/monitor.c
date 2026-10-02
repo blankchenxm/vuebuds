@@ -148,11 +148,81 @@ void monitorWake(void)
   }
 }
 
+#ifdef MONITOR_FIRST_FRAMES_TEST
+// Mean |a - b| over every 8th pixel of two slots.
+static uint32_t frame_diff(uint32_t slot_a, uint32_t slot_b)
+{
+  camera_frame_t a, b;
+  if (!cameraSlotFrame(slot_a, &a) || !cameraSlotFrame(slot_b, &b)) {
+    return 0;
+  }
+  uint32_t sum = 0, n = 0;
+  for (uint16_t y = 0; y < a.height; y += 8) {
+    for (uint16_t x = 0; x < a.width; x += 8) {
+      int32_t d = (int32_t)a.pixels[(uint32_t)y * a.stride + x] - b.pixels[(uint32_t)y * b.stride + x];
+      sum += (uint32_t)(d < 0 ? -d : d);
+      n++;
+    }
+  }
+  return n ? sum / n : 0;
+}
+
+/*
+ * Problem 3 experiment (HM0360, build with MONITOR_FIRST_FRAMES_TEST and MONITOR_SKIP_FRAMES=0):
+ * keep the 1st, 2nd and 3rd frame after each wake (the 3rd overwrites the 1st's slot) and
+ * compare |1st - 2nd| with |2nd - 3rd|, the frame-to-frame noise of a settled sensor.
+ * If they match (pre-meter already set the exposure), the skipped frame can go.
+ * Returns true while more frames of this wake are to come.
+ */
+static bool first_frames_test(void)
+{
+  static uint8_t frame;  // frames of this wake done so far
+  static uint32_t fvld1_us, done1_ms, done2_ms, mean1, mean2, diff12;
+  const capture_stats_t *stats = capture_stats();
+  uint32_t a = m_next, b = (m_next + 1) % m_slot_count;
+  if (!stats->ok) {
+    frame = 0;
+    return false;  // handled below as a bad frame
+  }
+  uint32_t t = systemTimeGetMs() - m_wake_ms;
+  if (frame == 0) {
+    fvld1_us = stats->arm_to_fvld_us;
+    done1_ms = t;
+    mean1 = frame_mean(a);
+    frame = 1;
+    cameraArmSlot(b, 0);  // sensor stays awake for the next frame
+    return true;
+  }
+  if (frame == 1) {
+    done2_ms = t;
+    mean2 = frame_mean(b);
+    diff12 = frame_diff(a, b);
+    frame = 2;
+    cameraArmSlot(a, 0);
+    return true;
+  }
+  frame = 0;
+  cameraSleep(true);
+  NRF_LOG_RAW_INFO("%08d [mon] first-frames: wake -> 1st FVLD %u ms, done 1st %u 2nd %u 3rd %u ms\n",
+                   systemTimeGetMs(), fvld1_us / 1000, done1_ms, done2_ms, t);
+  NRF_LOG_RAW_INFO("%08d [mon] first-frames: mean %u %u %u, |1st-2nd| %u, |2nd-3rd| %u\n", systemTimeGetMs(), mean1,
+                   mean2, frame_mean(a), diff12, frame_diff(b, a));
+  m_next = (b + 1) % m_slot_count;
+  m_busy = false;
+  return true;
+}
+#endif
+
 void monitorFrameDone(void)
 {
   if (!m_busy) {
     return;
   }
+#ifdef MONITOR_FIRST_FRAMES_TEST
+  if (m_s2 && first_frames_test()) {
+    return;
+  }
+#endif
   if (m_s2) {
     cameraSleep(true);
   }
