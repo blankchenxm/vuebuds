@@ -5,6 +5,21 @@
 
 ---
 
+## 2026-10-02 · 工具:两块 DK 同时接电脑时按板选择(PR #18,Issue #17)
+
+- **阶段**:工具
+- **改了什么**:
+  - `fw/tools/dk.ps1`:新增 `-Board HM0360|HM01B0`(默认 HM0360),nrfjprog 用 `--snr`、JLinkRTTLogger 用 `-USB`;RTT 日志写到 `_build_win\rtt_<板>.log`,`camera` 按 BLE 地址连接、图存到 `_build_win\frames_<板>\`。
+  - `host/protocol.py`:新增 `BOARDS`(两块板的 J-Link 序列号和 BLE 地址)。
+  - `host/viewer.py`、`fw/tools/ble_receive.py`:新增 `--board hm0360|hm01b0`,设定 BLE 地址;viewer 的 `--rtt --reset` 用对应的 J-Link。
+- **为什么**:两块板同时插着时,原来的工具不知道操作哪一块(两块都叫 `mustard`)。固件不变,两块板烧同一个 hex,开机自动识别传感器。
+- **和原代码的行为差异**:无(只是工具)。不加 `-Board` 时默认操作 HM0360 板,只插一块 HM01B0 板时要加 `-Board HM01B0`。
+- **验证**:
+  - HM01B0 板:`dk.ps1 flash/camera -Board HM01B0` 收 3 帧 320×240、0 丢包;`viewer.py --board hm01b0 --rtt --reset` 20 s 收 8 帧、0 丢包,RTT 来自 HM01B0 板。
+  - HM0360 板:`dk.ps1 flash/run -Board HM0360` 烧录、复位、RTT 都是这块板;但传感器不响应 I2C(接线检测 [4] MCLK 引脚翻转 PASS、[5] 0/5 读到 ID),和 10-01 的 MCLK 焊点问题症状一样,是硬件问题,等检查。
+- **发现**:HM01B0 推流时出现一帧 `dma 39503 39204`(第 1 段少 25 字节、没有 OVERFLOW、耗时短 73 µs):FVLD↑ 中断被推迟,TIMER4 晚启动,CS 晚拉低,第 1 行开头少收 25 字节,上半帧错位。这是笔记 §4.4 的风险第一次实测出现。
+- **遗留 / 下一步**:HM0360 模块硬件检查;问题 1–4 + HM01B0 Monitor。
+
 ## 2026-10-02 · HM0360 Monitor:RTC2 周期 S2 唤醒,帧写进环形缓存(PR #16,Issue #15)
 
 - **阶段**:TODO 第 4 步(HM0360 Monitor,只做缓存)
