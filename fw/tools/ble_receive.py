@@ -35,6 +35,7 @@ async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", default="mustard")
     ap.add_argument("--address", help="BLE address, skips name scan")
+    ap.add_argument("--board", choices=sorted(protocol.BOARDS), help="known DK: sets --address")
     ap.add_argument("--frames", type=int, default=3)
     ap.add_argument("--timeout", type=float, default=60.0)
     ap.add_argument("--out", default="_build_win/frames")
@@ -43,6 +44,8 @@ async def main():
     out_dir = pathlib.Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    if args.board and not args.address:
+        args.address = protocol.BOARDS[args.board]["address"]
     if args.address:
         device = args.address
     else:

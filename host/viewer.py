@@ -49,18 +49,20 @@ class SessionLog:
 class RttTap:
     """Runs JLinkRTTLogger into a file and forwards each new line to the session log."""
 
-    def __init__(self, log: SessionLog, out_file: pathlib.Path, reset: bool):
+    def __init__(self, log: SessionLog, out_file: pathlib.Path, reset: bool, snr: str | None = None):
         self.log = log
         self.out_file = out_file
         self._stop = threading.Event()
         if reset:
             # Reset before attaching so the log starts at boot; nrfjprog and the logger can't share the probe.
-            rc = subprocess.run(["nrfjprog", "-f", "nrf52", "--reset"], capture_output=True).returncode
+            probe = ["--snr", snr] if snr else []
+            rc = subprocess.run(["nrfjprog", "-f", "nrf52", *probe, "--reset"], capture_output=True).returncode
             log("rtt", f"target reset (nrfjprog rc={rc})")
         if out_file.exists():
             out_file.unlink()
+        probe = ["-USB", snr] if snr else []
         self._proc = subprocess.Popen(
-            [str(JLINK_DIR / "JLinkRTTLogger.exe"), "-Device", "NRF52840_XXAA", "-If", "SWD",
+            [str(JLINK_DIR / "JLinkRTTLogger.exe"), *probe, "-Device", "NRF52840_XXAA", "-If", "SWD",
              "-Speed", "4000", "-RTTChannel", "0", str(out_file)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
         self._thread = threading.Thread(target=self._tail, daemon=True)
@@ -198,18 +200,22 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", default=protocol.DEVICE_NAME)
     ap.add_argument("--address", help="BLE address; skips the name scan")
+    ap.add_argument("--board", choices=sorted(protocol.BOARDS),
+                    help="known DK: sets --address and the J-Link used by --rtt / --reset")
     ap.add_argument("--scale", type=int, default=2, help="display upscale factor")
     ap.add_argument("--rtt", action="store_true", help="also capture firmware logs over J-Link RTT")
     ap.add_argument("--reset", action="store_true", help="with --rtt: reset the board first so logs start at boot")
     ap.add_argument("--duration", type=float, help="quit automatically after N seconds")
     ap.add_argument("--snapshot", help="save the last rendered view to this PNG on exit")
     args = ap.parse_args()
+    board = protocol.BOARDS.get(args.board, {})
+    args.address = args.address or board.get("address")
 
     stamp = f"{datetime.datetime.now():%Y%m%d-%H%M%S}"
     log = SessionLog(HERE / "logs" / f"session-{stamp}.log")
     log("host", f"session log: {log.path}")
 
-    rtt = RttTap(log, HERE / "logs" / f"rtt-{stamp}.raw.log", args.reset) if args.rtt else None
+    rtt = RttTap(log, HERE / "logs" / f"rtt-{stamp}.raw.log", args.reset, board.get("snr")) if args.rtt else None
     rx = BleReceiver(log, args.name, args.address)
     fps = FpsMeter()
 

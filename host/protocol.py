@@ -11,6 +11,11 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 DEVICE_NAME = "mustard"
+# Both DKs advertise as "mustard"; pick one by J-Link serial number and BLE address.
+BOARDS = {
+    "hm0360": {"snr": "1050291681", "address": "C8:1A:80:9C:01:BC"},
+    "hm01b0": {"snr": "1050221517", "address": "D6:25:79:FD:6A:6B"},
+}
 # As advertised by the device; the comment in fw/ble_cus.h lists these bytes in a different order.
 _BASE = "47ea{:04x}-a0e4-554e-5282-0afcd3246970"
 DATA_UUID = _BASE.format(0x1402)

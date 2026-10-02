@@ -4,7 +4,7 @@
 #   .\tools\dk.ps1 flash              # build + program app + reset
 #   .\tools\dk.ps1 rtt -Seconds 20    # capture RTT channel 0 to _build_win\rtt.log
 #   .\tools\dk.ps1 run -Seconds 20    # build + flash + capture RTT
-#   .\tools\dk.ps1 camera -Frames 3   # reset, pull frames over BLE into _build_win\frames, show RTT log
+#   .\tools\dk.ps1 camera -Frames 3   # reset, pull frames over BLE into _build_win\frames_<board>, show RTT log
 #   .\tools\dk.ps1 run -Mode QQVGA -ColorBar   # camera mode / color bar test pattern (build, flash, run)
 #   .\tools\dk.ps1 run -WiringTest            # HM0360 wiring / state check (wiring_test.c), prints PASS/FAIL
 #   .\tools\dk.ps1 run -Monitor -Mode QQVGA   # HM0360 Monitor build (CAM_APP=MONITOR), starts at boot
@@ -17,7 +17,8 @@ param(
   [switch]$ColorBar,
   [switch]$WiringTest,
   [switch]$Monitor,
-  [switch]$NoLog
+  [switch]$NoLog,
+  [ValidateSet('HM0360', 'HM01B0')][string]$Board = 'HM0360'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,7 +32,13 @@ if ($WiringTest) { $OutDir += '_wiring' }
 if ($Monitor) { $OutDir += '_monitor' }
 $Hex = Join-Path $FwDir "$OutDir\banji_dev.hex"
 $SdHex = Join-Path $FwDir 'sdk\components\softdevice\s140\hex\s140_nrf52_7.2.0_softdevice.hex'
-$RttLog = Join-Path $FwDir '_build_win\rtt.log'
+# Both DKs run the same firmware (the sensor is detected at boot); they differ in probe and BLE address.
+$Boards = @{
+  'HM0360' = @{ Snr = '1050291681'; Address = 'C8:1A:80:9C:01:BC' }
+  'HM01B0' = @{ Snr = '1050221517'; Address = 'D6:25:79:FD:6A:6B' }
+}
+$Snr = $Boards[$Board].Snr
+$RttLog = Join-Path $FwDir "_build_win\rtt_$($Board.ToLower()).log"
 
 $GccBin = if ($env:ARM_GCC_BIN) { $env:ARM_GCC_BIN } else { 'C:\Program Files (x86)\GNU Arm Embedded Toolchain\10 2021.10\bin' }
 $JLinkDir = if ($env:JLINK_DIR) { $env:JLINK_DIR } else { 'C:\Program Files\SEGGER\JLink' }
@@ -58,7 +65,7 @@ function Invoke-Build {
 }
 
 function Invoke-Nrfjprog {
-  & nrfjprog -f nrf52 @args
+  & nrfjprog -f nrf52 --snr $Snr @args
   if ($LASTEXITCODE -ne 0) { throw "nrfjprog $args failed ($LASTEXITCODE)" }
 }
 
@@ -67,12 +74,12 @@ function Start-RttLogger {
   New-Item -ItemType Directory -Force (Split-Path $RttLog) | Out-Null
   if (Test-Path $RttLog) { Remove-Item $RttLog }
   Start-Process -FilePath $logger -PassThru -WindowStyle Hidden -ArgumentList @(
-    '-Device', 'NRF52840_XXAA', '-If', 'SWD', '-Speed', '4000', '-RTTChannel', '0', "`"$RttLog`"")
+    '-USB', $Snr, '-Device', 'NRF52840_XXAA', '-If', 'SWD', '-Speed', '4000', '-RTTChannel', '0', "`"$RttLog`"")
 }
 
 function Stop-RttLogger($Proc, [string]$Label) {
   if (-not $Proc.HasExited) { Stop-Process -Id $Proc.Id -Force }
-  Write-Host "===== RTT log ($Label) -> $RttLog ====="
+  Write-Host "===== RTT log ($Board, $Label) -> $RttLog ====="
   if (Test-Path $RttLog) { Get-Content $RttLog } else { Write-Host '(no RTT data captured)' }
 }
 
@@ -88,7 +95,7 @@ function Invoke-Camera {
   $p = Start-RttLogger
   Start-Sleep -Seconds 2
   $py = Join-Path $FwDir 'tools\.venv\Scripts\python.exe'
-  & $py (Join-Path $FwDir 'tools\ble_receive.py') --frames $Frames --timeout $Seconds --out (Join-Path $FwDir '_build_win\frames')
+  & $py (Join-Path $FwDir 'tools\ble_receive.py') --address $Boards[$Board].Address --frames $Frames --timeout $Seconds --out (Join-Path $FwDir "_build_win\frames_$($Board.ToLower())")
   $rc = $LASTEXITCODE
   Start-Sleep -Seconds 1
   Stop-RttLogger $p 'camera'

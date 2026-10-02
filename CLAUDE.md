@@ -53,7 +53,7 @@
 ```
 - 直接用 make:`make banji_dev CAM_MODE=QQVGA CAM_TEST_PATTERN=COLOR_BAR OUTPUT_DIRECTORY=_build_win_qqvga_colorbar ...`。**只改这些参数时 SDK Makefile 不会重新编译**,所以每种组合要用不同的 `OUTPUT_DIRECTORY`(`dk.ps1` 已自动处理)。
 - 在 bash 里直接调 make 要额外 CFLAGS 时,用环境变量:`CFLAGS=-DXXX make banji_dev ...`;**不要**在命令行写 `CFLAGS+=`,会覆盖 Makefile 里的全部参数。
-- 设备:当前 DK(接 HM0360,2026-10-01 起)J-Link SN `1050291681`,芯片 nRF52840 **REV3**,BLE 地址 `C8:1A:80:9C:01:BC`;之前接 HM01B0 的 DK 是 SN `1050221517`、`D6:25:79:FD:6A:6B`。BLE 名都是 `mustard`(viewer / ble_receive 按名字扫描);数据特征 `47ea1402-a0e4-554e-5282-0afcd3246970`(notify),控制 `47ea1403-…`,写 `0xB1` 开始推流(`ble_cus.h` 注释里的 UUID 字节序是错的)。
+- 设备:**两块 DK 同时接在电脑上**(2026-10-02 起):HM0360 板 J-Link SN `1050291681`、BLE `C8:1A:80:9C:01:BC`;HM01B0 板 SN `1050221517`、BLE `D6:25:79:FD:6A:6B`;芯片都是 nRF52840 **REV3**。`dk.ps1 -Board HM0360|HM01B0`(默认 HM0360)、`viewer.py / ble_receive.py --board hm0360|hm01b0` 选板;直接用 nrfjprog 要加 `--snr`,JLinkRTTLogger 加 `-USB <SN>`,JLink.exe 加 `-USB <SN>`。BLE 名都是 `mustard`(viewer / ble_receive 按名字扫描);数据特征 `47ea1402-a0e4-554e-5282-0afcd3246970`(notify),控制 `47ea1403-…`,写 `0xB1` 开始推流(`ble_cus.h` 注释里的 UUID 字节序是错的)。
 - 诊断:RTT 是主要手段;读 RAM 变量/寄存器可以用 `JLink.exe -CommandFile`(一次会话批量读,比逐条 `nrfjprog --memrd` 快很多);`arm-none-eabi-nm` 查变量地址。
 
 ## 已知坑
