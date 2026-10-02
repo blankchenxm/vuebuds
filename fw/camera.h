@@ -16,7 +16,7 @@ void cameraInit(void);
 void cameraDeInit(void);
 void cameraStartStream(void);
 void cameraReadyNextFrame(void);
-bool cameraGetFrame(camera_frame_t *frame);
+bool cameraGetFrame(camera_frame_t *frame);  // false for a bad frame (wrong DMA byte count / overflow)
 void cameraEnableStandbyMode(bool);
 
 /* Monitor (HM0360) */
