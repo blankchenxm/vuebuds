@@ -17,7 +17,7 @@
   - **HM0360**(PR #14):QVGA = Sub2、QQVGA = Sub4,**只子采样、不开合并**(开合并两种模式都会出现大量黑/白竖条,2026-10-01 用户选方案 A);窗口模式 640×480;Sensor_Core = MCLK ÷ 8 = 1 MHz,1-bit 串行,PCLKO **按行门控**(`0x309E=0x02`、`0x30A5=0x01`、行前后沿 `0x30A1–0x30A4=0`);`AE_CTRL=0x1F`(关自动降帧率);行长 376,**帧长 QVGA 276 / QQVGA 156**(传感器最小值 = 输出行数 + 36,设得更小会被悄悄抬高;帧周期 103.8 / 58.7 ms);片选沿用 VueBuds 方案,HM0360 参数 `fvld_to_cs_us = 20`、`first_line = 0`(收满全部行);`cameraInit()` 开 MCLK 后拉一下 RST(P1.05)再检测,**开机不拉低 RST**(用户决定,HM01B0 模块没有 RST);不做软件复位。
   - HM0360 的 FVLD(`0x30A5=0x01` VSYNC 模式)是整帧周期信号:上升 2 行后出第 0 行,36 行空白都在高电平里,**帧间只低 54–65 µs**。采集**数到最后一行就结束**(PR #26 起),日志里每帧耗时 QVGA 约 90.9 ms、QQVGA 约 45.6 ms(数据行),不再是帧周期。
   - **Monitor 两颗传感器都做**(HM01B0 版 2026-10-02 用户提出):HM0360 用 S2;HM01B0 没有 S2,**MCLK 常开、传感器一直出帧**,就是推流流程去掉 BLE(PR #22)。不开运动检测;不做触发/回传;不做 VGA。S2 唤醒流程(XSLEEP 低 → 关 MCLK → 开 MCLK → XSLEEP 高)已实测:立刻能读 I2C,寄存器保留,不用重写。
-  - **Monitor 实现**(PR #16,2026-10-01 用户确认):编译时 `CAM_APP=MONITOR`(默认 `STREAM`)、开机自动开始、RTC2 周期 `MONITOR_PERIOD_MS = 500`、每次唤醒**固定跳过 1 帧**存第 2 帧(`MONITOR_SKIP_FRAMES = 1`);传感器开始时进流模式,之后只靠 XSLEEP + MCLK 睡眠 / 唤醒;BLE 照常广播、不推流;代码在 `fw/monitor.c`。开机按型号自动选 HM0360 / HM01B0 流程;HM01B0 不跳帧;`MONITOR_PERIOD_MS=0` 每帧都存(`dk.ps1 -PeriodMs 0`);坏帧(字节数不对)不存、不发(PR #20)。
+  - **Monitor 实现**(PR #16,2026-10-01 用户确认):编译时 `CAM_APP=MONITOR`(默认 `STREAM`)、开机自动开始、RTC2 周期 `MONITOR_PERIOD_MS = 500`、每次唤醒**不跳帧**,存唤醒后的第 1 帧(`MONITOR_SKIP_FRAMES = 0`;2026-10-02 用户决定,PR #28,原来是跳 1 帧:实测第 1 帧和第 2、3 帧亮度相同、帧间差异 1–2/255 = 正常噪声,只在静止室内场景测过,睡眠中光线突变未测);传感器开始时进流模式,之后只靠 XSLEEP + MCLK 睡眠 / 唤醒;BLE 照常广播、不推流;代码在 `fw/monitor.c`。开机按型号自动选 HM0360 / HM01B0 流程;HM01B0 不跳帧;`MONITOR_PERIOD_MS=0` 每帧都存(`dk.ps1 -PeriodMs 0`);坏帧(字节数不对)不存、不发(PR #20)。
   - RAM 保持现状(RTT 保留,日志缓冲 16 KB、堆 8 KB 不缩小)。
 
 ## 仓库结构
@@ -80,7 +80,7 @@
 - `delayMs()` 用 `__WFE` 睡眠,只有中断能唤醒;BLE 启动前(只有 1 s 一次的系统定时器中断)短延时会被拉长到约 1 s。诊断代码里用 `nrf_delay_ms()`。
 - RTT 上行缓冲只有 512 B,电脑没连上时日志直接丢;大量 I2C NACK 日志会刷出 `Logs dropped`。
 - **HM0360 必须在帧边界(FVLD 低的 65 µs 里)拉低 XSLEEP**,否则下一次唤醒多等整整一帧(QVGA 131 → 235 ms)。PR #32 起由 FVLD↓ → PPI 直接拉低,之后 `EVENT_CAMERA_ASLEEP` 关 MCLK;等不到帧边界时超时强制拉低(采完后 30 ms、其它时候 250 ms)。**开机后传感器刚开始出帧的那段时间(> 250 ms)和第一次唤醒的那一帧 FVLD 不下降**,所以前两次睡眠是超时强制的、第一次唤醒多采一帧(存完 429 ms),从第二次唤醒起正常。
-- **HM0360 从 XSLEEP 唤醒后约 1.3 个帧周期才出第一个 FVLD**(QQVGA 77 ms、QVGA 131 ms);Monitor 每次唤醒 MCLK 开 195 / 339 ms(跳 1 帧)。QVGA 刚启动的第一次唤醒约 540 ms,会记一次 overrun,正常。
+- **HM0360 从 XSLEEP 唤醒后约 1.3 个帧周期才出第一个 FVLD**(QQVGA 77 ms、QVGA 131 ms);Monitor 每次唤醒 MCLK 开 QQVGA 136 / QVGA 235 ms(不跳帧;跳 1 帧时 195 / 339 ms)。pre-meter(0x3026 / 0x3027)不影响这个等待(PR #28 实测),主要是曝光时间。QVGA 刚启动的第一次唤醒约 540 ms,会记一次 overrun,正常。
 - 看 Monitor 存下的帧:J-Link `savebin <无空格路径>, <__frame_pool_start>, <长度>`,**先 `h` 暂停 CPU 再读**;运行中读会读到刚清零、还没收完的槽(顶部一截全 0)。读完 `nrfjprog --reset`。
 - 日志时间戳(`systemTimeGetMs`,TIMER1 跑在 HFCLK 上,没开 HFXO 时是内部 RC)比 RTC(32.768 kHz 晶振)快约 0.5%,所以 500 ms 的周期显示成 497–498 ms。
 - **比较 BLE 帧率用 `host/ble_bench.py --board … --duration 40 --label … --csv logs/bench.csv`**,两版在同一时间段里交替跑(A B A B …),每版至少 3 次取平均。viewer 的 `last_fps` 只算最近 5 帧,噪声很大(一次 1.6 s 的间隔就从 1.0 掉到 0.86),看 `session_fps`。瓶颈在电脑端:连接间隔 7.5 ms 或 15 ms(Windows 每次连接自己选)都是约 310 包/s ≈ 1 fps(QVGA 318 包 / 帧);SoftDevice 通知队列从 1 加到 16 没有变化(PR #24)。
