@@ -15,9 +15,10 @@
 #ifndef MONITOR_PERIOD_MS
 #define MONITOR_PERIOD_MS 500
 #endif
-// Frames to let pass after each HM0360 wake before the one that is stored (user choice: 1).
+// Frames to let pass after each HM0360 wake before the one that is stored. 0 since PR #28
+// (user choice 10-02): the 1st frame after a wake matched the 2nd and 3rd (was 1).
 #ifndef MONITOR_SKIP_FRAMES
-#define MONITOR_SKIP_FRAMES 1
+#define MONITOR_SKIP_FRAMES 0
 #endif
 
 #define MONITOR_MAX_SLOTS 16

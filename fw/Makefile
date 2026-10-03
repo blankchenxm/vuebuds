@@ -311,7 +311,7 @@ CFLAGS += -DCAMERA_APP_MONITOR
 else ifneq ($(CAM_APP),STREAM)
 $(error CAM_APP must be STREAM or MONITOR, got '$(CAM_APP)')
 endif
-# Optional Monitor tuning (defaults in monitor.c: 500 ms, skip 1 frame per wake)
+# Optional Monitor tuning (defaults in monitor.c: 500 ms, no skipped frame per wake)
 ifneq ($(MONITOR_PERIOD_MS),)
 CFLAGS += -DMONITOR_PERIOD_MS=$(MONITOR_PERIOD_MS)
 endif
@@ -404,7 +404,7 @@ help:
 	@echo   banji      - build form factor
 	@echo		banji_dev  - build dev kit
 	@echo		  options: RTT_LOG=1  CAM_MODE=QVGA/QQVGA  CAM_TEST_PATTERN=COLOR_BAR/WALKING_1
-	@echo		           CAM_APP=STREAM/MONITOR  MONITOR_PERIOD_MS=500  MONITOR_SKIP_FRAMES=1
+	@echo		           CAM_APP=STREAM/MONITOR  MONITOR_PERIOD_MS=500  MONITOR_SKIP_FRAMES=0
 	@echo		flash_softdevice - flash soft device
 	@echo		sdk_config - starting external tool for editing sdk_config.h
 	@echo		flash      - flashing form factor binary
