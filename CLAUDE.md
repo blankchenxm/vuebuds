@@ -15,7 +15,7 @@
   - 帧槽按传感器完整输出分配(HM01B0 QVGA 324×244、QQVGA 162×122),**固件发 BLE 时裁成标准 320×240 / 160×120**;BLE 帧头带宽高。HM0360 用窗口模式 `0x3030[0]=1` 直接输出标准尺寸(笔记 §5.3)。
   - **片选时序保持 VueBuds 原设计**:FVLD 上升 → TIMER4 延时(QVGA 312 µs)→ 拉低 CS。HM01B0 第 0 行紧跟 FVLD 开始,这个延时**有意跳过第 0 行**,所以 DMA 收第 1–243 行(`mode_info.first_line = 1`),槽里第 0 行为空,标准裁剪 y=2 不受影响。在 FVLD 上升时就拉 CS(哪怕用 PPI)会丢第一个字节、整段错 1 像素(PR #9 实测)。
   - **HM0360**(PR #14):QVGA = Sub2、QQVGA = Sub4,**只子采样、不开合并**(开合并两种模式都会出现大量黑/白竖条,2026-10-01 用户选方案 A);窗口模式 640×480;Sensor_Core = MCLK ÷ 8 = 1 MHz,1-bit 串行,PCLKO **按行门控**(`0x309E=0x02`、`0x30A5=0x01`、行前后沿 `0x30A1–0x30A4=0`);`AE_CTRL=0x1F`(关自动降帧率);行长 376,**帧长 QVGA 276 / QQVGA 156**(传感器最小值 = 输出行数 + 36,设得更小会被悄悄抬高;帧周期 103.8 / 58.7 ms);片选沿用 VueBuds 方案,HM0360 参数 `fvld_to_cs_us = 20`、`first_line = 0`(收满全部行);`cameraInit()` 开 MCLK 后拉一下 RST(P1.05)再检测,**开机不拉低 RST**(用户决定,HM01B0 模块没有 RST);不做软件复位。
-  - HM0360 的 FVLD(`0x30A5=0x01` VSYNC 模式)是整帧周期信号:上升 2 行后出第 0 行,36 行空白都在高电平里,**帧间只低 54–65 µs**;日志里每帧"耗时"≈ 帧周期。
+  - HM0360 的 FVLD(`0x30A5=0x01` VSYNC 模式)是整帧周期信号:上升 2 行后出第 0 行,36 行空白都在高电平里,**帧间只低 54–65 µs**。PR #26 起采集**数到最后一行就结束**(TIMER2 硬件计数 LVLD,FVLD↓ 只做后备),日志里每帧耗时 QVGA 约 90.9 ms、QQVGA 约 45.6 ms(数据行),不再是帧周期。
   - **Monitor 两颗传感器都做**(HM01B0 版 2026-10-02 用户提出):HM0360 用 S2;HM01B0 没有 S2,**MCLK 常开、传感器一直出帧**,就是推流流程去掉 BLE(PR #22)。不开运动检测;不做触发/回传;不做 VGA。S2 唤醒流程(XSLEEP 低 → 关 MCLK → 开 MCLK → XSLEEP 高)已实测:立刻能读 I2C,寄存器保留,不用重写。
   - **Monitor 实现**(PR #16,2026-10-01 用户确认):编译时 `CAM_APP=MONITOR`(默认 `STREAM`)、开机自动开始、RTC2 周期 `MONITOR_PERIOD_MS = 500`、每次唤醒**固定跳过 1 帧**存第 2 帧(`MONITOR_SKIP_FRAMES = 1`);传感器开始时进流模式,之后只靠 XSLEEP + MCLK 睡眠 / 唤醒;BLE 照常广播、不推流;代码在 `fw/monitor.c`。开机按型号自动选 HM0360 / HM01B0 流程;HM01B0 不跳帧;`MONITOR_PERIOD_MS=0` 每帧都存(`dk.ps1 -PeriodMs 0`);坏帧(字节数不对)不存、不发(PR #20)。
   - RAM 保持现状(RTT 保留,日志缓冲 16 KB、堆 8 KB 不缩小)。
@@ -70,7 +70,7 @@
 - Windows 偶尔在 BLE 刚连上时取消连接(`操作已被用户取消`),viewer 会自动重连;但固件断连会 `NVIC_SystemReset`,而 JLinkRTTLogger 在芯片重启后不会重新连上 RTT,这一次会话就没有固件日志了,重跑即可。
 - 在 bash heredoc 里用 Python 改 C 文件时,`\\n` 会被转义成真换行;含反斜杠的改动用 Edit 工具。
 - **QVGA 偶发一帧下半部错位(Issue #13,暂未修)**:两段 DMA 之间的 CS 脉冲在 LVLD 中断里发,必须落在行间消隐(HM0360 约 56 µs、HM01B0 约 52 µs)内;SoftDevice 偶尔把中断推迟,RTT 会出现类似 `dma 38400 38378 OVERFLOW`。可选方案见 Issue #13。QQVGA 只有一段,不受影响。
-- **HM0360 偶发一帧耗时翻倍**(Issue #13):帧结束的 FVLD 下降沿中断要在 54–65 µs 内执行,赶不上时采集晚一个帧周期,可能带 `OVERFLOW`,但数据正确。每次推流的第 1 帧耗时约两倍是正常的。
+- ~~HM0360 偶发一帧耗时翻倍~~:PR #26 改成数行结束后已消失(main 60 s 里 11 帧翻倍 → 0)。行末带 `(ended by FVLD)` 说明那一帧由后备条件结束(HM01B0 偶尔会有,数据正确)。
 - **改 HM0360 帧长 / 行长后跑 `-WiringTest` 的第 [11] 项**,确认实测帧周期 = 寄存器帧长 × 行长(低于最小值会被传感器悄悄抬高)。
 - **HM0360 一直不响应 I2C 时,先查 MCLK 的焊点 / 接触**(2026-10-01 花了很久排查,最后是模块 MCLK 焊接不良;时好时坏,一坏整次运行都不响应)。先跑 `.\tools\dk.ps1 run -WiringTest`。
 - HM0360 必须有 MCLK 才响应 I2C(包括读 ID);上电时没有 MCLK 的话,要在 MCLK 运行后拉一下 RST(XSHUTDOWN)。
@@ -79,6 +79,7 @@
 - `i2cWrite16()` 每次写完都会回读校验,所以写只写寄存器(`0x0103` SW_RESET、`0x0104` COMMAND_UPDATE)会打出 `failed to write` 日志,是噪音;**不要**在 HM0360 上用它写 SW_RESET(复位中马上回读会锁死总线)。
 - `delayMs()` 用 `__WFE` 睡眠,只有中断能唤醒;BLE 启动前(只有 1 s 一次的系统定时器中断)短延时会被拉长到约 1 s。诊断代码里用 `nrf_delay_ms()`。
 - RTT 上行缓冲只有 512 B,电脑没连上时日志直接丢;大量 I2C NACK 日志会刷出 `Logs dropped`。
+- **HM0360 必须在帧边界(FVLD 低的 65 µs 里)拉低 XSLEEP**,否则下一次唤醒多等整整一帧(QVGA 131 → 235 ms);Monitor 采完后会忙等到 FVLD↓ 再睡(PR #26)。
 - **HM0360 从 XSLEEP 唤醒后约 1.3 个帧周期才出第一个 FVLD**(QQVGA 77 ms、QVGA 131 ms);Monitor 每次唤醒 MCLK 开 195 / 339 ms(跳 1 帧)。QVGA 刚启动的第一次唤醒约 540 ms,会记一次 overrun,正常。
 - 看 Monitor 存下的帧:J-Link `savebin <无空格路径>, <__frame_pool_start>, <长度>`,**先 `h` 暂停 CPU 再读**;运行中读会读到刚清零、还没收完的槽(顶部一截全 0)。读完 `nrfjprog --reset`。
 - 日志时间戳(`systemTimeGetMs`,TIMER1 跑在 HFCLK 上,没开 HFXO 时是内部 RC)比 RTC(32.768 kHz 晶振)快约 0.5%,所以 500 ms 的周期显示成 497–498 ms。
