@@ -152,6 +152,18 @@ void monitorWake(void)
   }
 }
 
+// HM0360: sleep on a frame boundary. The capture ends after the last line, ~13 ms before
+// FVLD falls. Measured (QVGA): XSLEEP low inside the 65 us FVLD-low gap -> the next wake
+// gives its first FVLD after 131 ms; low anywhere inside a frame -> 235 ms (one frame more).
+static void sleep_on_frame_boundary(void)
+{
+  uint32_t t0 = (uint32_t)systemTimeGetUs();
+  while (nrf_gpio_pin_read(CAM_FRAME_VALID) && (uint32_t)systemTimeGetUs() - t0 < MONITOR_FVLD_FALL_TIMEOUT_US) {
+  }
+  m_sleep_wait_us = (uint32_t)systemTimeGetUs() - t0;
+  cameraSleep(true);
+}
+
 #ifdef MONITOR_FIRST_FRAMES_TEST
 // Mean |a - b| over every 8th pixel of two slots.
 static uint32_t frame_diff(uint32_t slot_a, uint32_t slot_b)
@@ -206,7 +218,7 @@ static bool first_frames_test(void)
     return true;
   }
   frame = 0;
-  cameraSleep(true);
+  sleep_on_frame_boundary();
   NRF_LOG_RAW_INFO("%08d [mon] first-frames: wake -> 1st FVLD %u ms, done 1st %u 2nd %u 3rd %u ms\n",
                    systemTimeGetMs(), fvld1_us / 1000, done1_ms, done2_ms, t);
   NRF_LOG_RAW_INFO("%08d [mon] first-frames: mean %u %u %u, |1st-2nd| %u, |2nd-3rd| %u\n", systemTimeGetMs(), mean1,
@@ -228,14 +240,7 @@ void monitorFrameDone(void)
   }
 #endif
   if (m_s2) {
-    // Sleep on a frame boundary: the capture now ends after the last line, ~13 ms before
-    // FVLD falls. Measured (QVGA): XSLEEP low inside the 65 us FVLD-low gap -> the next wake
-    // gives its first FVLD after 131 ms; low anywhere inside a frame -> 235 ms (one frame more).
-    uint32_t t0 = (uint32_t)systemTimeGetUs();
-    while (nrf_gpio_pin_read(CAM_FRAME_VALID) && (uint32_t)systemTimeGetUs() - t0 < MONITOR_FVLD_FALL_TIMEOUT_US) {
-    }
-    m_sleep_wait_us = (uint32_t)systemTimeGetUs() - t0;
-    cameraSleep(true);
+    sleep_on_frame_boundary();
   }
 
   const capture_stats_t *stats = capture_stats();
