@@ -228,6 +228,19 @@ void i2cWrite16(uint8_t addr, uint16_t reg, uint8_t data)
   i2cEnable(false);
 }
 
+// Same as i2cWrite16 without the read-back, for write-only / self-clearing registers
+// such as a sensor software reset (reading back right after a reset can hang the bus).
+void i2cWrite16NoVerify(uint8_t addr, uint16_t reg, uint8_t data)
+{
+  i2cEnable(true);
+  uint8_t bytes[3] = {(reg >> 8) & 0xFF, reg & 0xFF, data};
+
+  resetFlags();
+  APP_ERROR_CHECK(nrf_drv_twi_tx(&i2cHandle, addr, bytes, sizeof(bytes), false));
+  waitForTransfer();
+  i2cEnable(false);
+}
+
 uint8_t i2cRead16(uint8_t addr, uint16_t reg)
 {
   i2cEnable(true);

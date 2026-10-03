@@ -29,6 +29,51 @@
 - **遗留 / 下一步**:
   - **是否把 `MONITOR_SKIP_FRAMES` 默认改成 0,由用户决定**(10-01 定的是跳 1 帧)。只在静止的室内场景测过;睡眠期间光线突变时第 1 帧的曝光还没验证(默认配置下唤醒时会做 pre-meter,理论上就是为了这种情况)。
   - 剩下的 131 ms 唤醒等待:可以试 MODE_SELECT 的快照 / 自动唤醒模式(Streaming 2 / 3)代替 XSLEEP,看醒来是否更快。
+## 2026-10-02 · 方案 A:CS 和 DMA 换段全部交给硬件(PPI),PPI 拉低 XSLEEP(PR #32,Issue #31)
+
+- **阶段**:修 bug(Issue #13 两种现象 + HM01B0 坏帧;用户 10-02 选定方案 A)
+- **改了什么**:
+  - `fw/capture/capture.c`(重写):CS(P0.12)和 XSLEEP(P1.04)改成 GPIOTE 任务引脚;TIMER2 计数 LVLD↓(FVLD 边沿清零),四个比较通道:CC1 = `first_line`(HM01B0 帧开始)、CC2 = 分段边界、CC0 = 最后一行、CC3 = `first_line + 1`(通知 CPU 预写下一段)。三个 PPI 通道组由硬件事件开关:arm(帧开始触发 → CS 低,关掉自己、打开 run)、run(边界 → CS 高 + 启动 TIMER4,TIMER4 2 µs 后 → CS 低;最后一行 → CS 高、关掉 run)、sleep(FVLD↓ → XSLEEP 低,关掉自己)。TIMER4 从"312 µs 延时"改成 2 µs 脉冲。HM0360 帧开始用 FVLD 边沿触发(第 0 行在 750 µs 后)。SPIS 去掉 END→ACQUIRE、关掉 END 中断,CPU 在上一段期间直接写下一段的 RXD.PTR / MAXCNT;跳帧改成按每帧最后一行(CC0)计数。
+  - `fw/capture/capture.h`:说明更新;去掉 `ended_by_line_count`;新增 `capture_xsleep()`、`capture_xsleep_on_frame_boundary()`。
+  - `fw/camera.c/.h`:`cameraSleep()` 换成 `cameraWake()`、`cameraSleepOnFrameBoundary()`(PPI 在帧边界拉低 XSLEEP,app_timer 超时保护:采完后 30 ms、其它时候 250 ms)、`cameraAsleep()`(`EVENT_CAMERA_ASLEEP` 后关 MCLK)。
+  - `fw/monitor.c/.h`、`fw/main.c`、`fw/event.h`:Monitor 不再忙等 FVLD↓;新增 `EVENT_CAMERA_ASLEEP` → `monitorAsleep()`,每次睡下打印 MCLK 开了多久;开机后的第一次睡眠也在帧边界。
+  - 新增 `fw/stress_test.c`(`-DCAPTURE_STRESS_US=N` 才编译):RTC2 每约 7 ms 一次优先级 2 的中断,空转 N µs,用来验证采集不依赖中断时机。`fw/tools/dk.ps1` 新增 `-Cflags`(和 PR #28 相同的改动)。
+  - `fw/sensors/camera_sensor.h`:注明 `fvld_to_cs_us` 不再使用。
+- **为什么**:原来每个 CS 边沿(帧开始、分段边界、最后一行)都在中断里拨,SoftDevice 能把中断推迟几十到几百 µs,而 HM01B0 帧开始和分段边界的窗口只有约 52 µs。
+- **和原代码的行为差异**:
+  - VueBuds 原设计是 FVLD↑ 中断启动 TIMER4、312 µs 后 TIMER4 中断拉低 CS,分段边界在 LVLD 中断里拉 1 µs 脉冲,换段在 SPIS 中断里。现在全部是 PPI。HM01B0 的 CS 拉低时刻从"FVLD↑ 后 312 µs"变成"第 0 行刚结束"(仍然跳过第 0 行,DMA 字节数不变);HM0360 从"FVLD↑ 后 20 µs"变成"FVLD 边沿"。
+  - LVLD 不再有中断;中断只剩 TIMER2 的三个比较(每帧 2–4 次)和 FVLD(记时间、睡眠)。
+  - 多用了 2 个 GPIOTE 通道、6 个 PPI 通道、3 个 PPI 通道组;TIMER4 用途改变。
+- **验证**:
+  - 推流(无压力):HM01B0 QVGA 90 s **101 帧 0 坏帧**、1.11 fps(之前同一块板 7–10% 坏帧、0.85–0.98 fps);HM01B0 QQVGA 40 s 155 帧 0 坏帧(之前 10%);HM0360 QVGA / QQVGA 0 坏帧,`38400 38400` / `19200`,90.9 / 45.7 ms。
+  - **压力测试**(每约 7 ms 一次 300 µs 高优先级中断):
+
+| 板 | main(中断拨 CS) | 本 PR |
+|---|---|---|
+| HM01B0 QVGA 60 s | 69 帧里 **9 帧坏帧**(帧开始晚、分段错位都有) | 62 帧 **0** |
+| HM0360 QVGA 60 s | 66 帧里 **7 帧坏帧** | 60 帧 **0** |
+| HM01B0 QVGA,2000 µs 压力 | — | 44 帧 **0** |
+
+  - SPIS 换段前提实验:在第 1 段接收中途写 RXD.PTR,第 1 段不受影响(第 20 行后 0 个零字节),第 2 段完整落到新地址,两块板都是。
+  - HM0360 Monitor:QVGA 唤醒 → 第一个 FVLD 131 ms、MCLK 开 339–340 ms;QQVGA 77 / 195 ms;各 20 s 38 帧,0 坏帧、0 overrun。HM01B0 Monitor QVGA 38 帧 0 坏帧。接线检测版本能编译。
+- **发现**:**HM0360 开始出帧后的一段时间(> 250 ms)和开机后第一次唤醒的那一帧,FVLD 在帧与帧之间不下降**。所以开机后前两次睡眠由超时强制、第一次唤醒多采一帧(存完 429 ms,正常 326 ms),从第二次唤醒起正常。PR #26 的忙等版本同样碰到过(第一次睡眠等满 30 ms),原来的版本则是开机第一次唤醒 540 ms + 1 次 overrun。
+- **遗留 / 下一步**:PR #28(唤醒实验工具)要和这个 PR 合并后的 `monitor.c` 对齐。
+
+## 2026-10-02 · HM01B0 初始化加软件复位,换模式后第一次初始化就生效(PR #30,Issue #29)
+
+- **阶段**:修 bug(用户 10-02 同意)
+- **改了什么**:
+  - `fw/sensors/hm01b0/hm01b0_sensor.c`:新增 `hm01b0_reset()`:先写待机(`0x0100 = 0`),等 110 ms(比最长的 QVGA 帧 97.8 ms 长)让正在出的那一帧结束,再软件复位(`0x0103 = 0x01`,和 ESP32 驱动一致),等 10 ms。`hm01b0_init()` 在读到 ID 之后、写寄存器表之前调用它。
+  - `fw/i2c.c/.h`:新增 `i2cWrite16NoVerify()`(写完不回读),给软件复位这种只写 / 自动清零的寄存器用。
+  - `fw/sensors/hm01b0/private_include/hm01b0_regs.h`:`HM01B0_SOFTWARE_RESET`、`HM01B0_RESET_RECOVERY_MS`、`HM01B0_FRAME_DRAIN_MS`。
+- **为什么**:HM01B0 模块没有 RST,DK 复位不断电;换了模式的固件后第一次初始化有时不生效(帧周期还是旧模式、每帧 `19602 OVERFLOW`)。
+- **和原代码的行为差异**:VueBuds 原初始化没有软件复位;现在初始化多了约 120 ms,且自动曝光每次都从默认值开始(和冷启动一样)。
+- **验证**(HM01B0 板):
+  - 只加软件复位(等 1 ms 或 10 ms):QVGA → QQVGA 3 次里仍有 1 次不生效(每帧 45 ms、`19602 OVERFLOW`)。推测传感器正在出帧时收到复位,要等这一帧结束才执行,把复位后马上写进去的寄存器表清掉了。等 1 ms 时还偶尔多出 `0x3057` / `0x0343` 回读失败。
+  - 加上"先待机、等 110 ms":QVGA / QQVGA 交替 **10 次全部第一次就正常**,0 坏帧,没有新的写入失败(只剩原来就有的 `0x3052`)。
+  - 副作用:QVGA 存下的第 1 帧平均亮度约 135,第 2 帧起约 100(自动曝光从默认值收敛);QQVGA 第 1 帧就正常。
+  - 推流回归:和 main 交替各 3 次 × 40 s,0.84–0.85 vs 0.84–0.88 fps,坏帧数相当(这个时段整体比上午慢)。
+- **遗留 / 下一步**:无。
 
 ## 2026-10-02 · 问题 1(方案 E):数到最后一行就结束采集,不等 FVLD↓(PR #26,Issue #25)
 

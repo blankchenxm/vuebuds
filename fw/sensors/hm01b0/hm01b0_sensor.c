@@ -1,4 +1,6 @@
 #include "nrf_log.h"
+#include "nrf_delay.h"
+#include "i2c.h"
 #include "hm01b0.h"
 #include "private_include/hm01b0_private.h"
 #include "private_include/hm01b0_regs.h"
@@ -28,6 +30,20 @@ ret_code_t hm01b0_probe(uint16_t *model_id)
     NRF_LOG_RAW_INFO("[hm01b0] unexpected model id 0x%04X\n", id);
     return NRF_ERROR_NOT_FOUND;
   }
+  return NRF_SUCCESS;
+}
+
+ret_code_t hm01b0_reset(void)
+{
+  // If the previous firmware left the sensor streaming, let the current frame finish
+  // first: a reset written mid-frame sometimes took effect later and wiped the tables
+  // written right after it (measured: 1 of 3 QVGA -> QQVGA switches).
+  hm01b0_reg_write(HM01B0_REG_MODE_SELECT, HM01B0_MODE_STANDBY);
+  nrf_delay_ms(HM01B0_FRAME_DRAIN_MS);
+  // Write-only, so no read-back (i2cWrite16 would verify it).
+  i2cWrite16NoVerify(HM01B0_I2C_ADDRESS, HM01B0_REG_SW_RESET, HM01B0_SOFTWARE_RESET);
+  nrf_delay_ms(HM01B0_RESET_RECOVERY_MS);
+  hm01b0_dev.state = HM01B0_STATE_STANDBY;
   return NRF_SUCCESS;
 }
 
@@ -104,6 +120,9 @@ ret_code_t hm01b0_set_test_pattern(camera_test_pattern_t pattern)
 ret_code_t hm01b0_init(camera_mode_t mode, camera_test_pattern_t pattern)
 {
   RETURN_IF_ERROR(hm01b0_probe(NULL));
+  // The module has no reset pin and a DK reset does not power-cycle it: without this the
+  // previous firmware's mode (e.g. QVGA) can survive the first init of a QQVGA build.
+  RETURN_IF_ERROR(hm01b0_reset());
   RETURN_IF_ERROR(hm01b0_standby());
   RETURN_IF_ERROR(hm01b0_write_table(hm01b0_base_init, hm01b0_base_init_count));
   RETURN_IF_ERROR(hm01b0_set_test_pattern(pattern));

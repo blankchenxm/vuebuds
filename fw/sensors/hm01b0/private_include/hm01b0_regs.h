@@ -15,6 +15,11 @@
 #define HM01B0_REG_MODE_SELECT                  0x0100U
 #define HM01B0_REG_IMAGE_ORIENTATION            0x0101U
 #define HM01B0_REG_SW_RESET                     0x0103U
+#define HM01B0_SOFTWARE_RESET                   0x01U  // either 0 or 1 resets (ESP32 driver uses 1)
+#define HM01B0_RESET_RECOVERY_MS                10
+// Longest frame of our modes (QVGA 260 x 376 us = 97.8 ms) plus margin: a streaming
+// sensor only stops after the current frame.
+#define HM01B0_FRAME_DRAIN_MS                   110
 #define HM01B0_REG_GROUP_PARAMETER_HOLD         0x0104U
 
 /* Established HM01B0 drivers write 0x01 after changing CMU registers. */

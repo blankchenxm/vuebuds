@@ -40,7 +40,8 @@ typedef struct {
   uint16_t transport_height;
   // Region of the transport frame sent over BLE (320x240 / 160x120).
   camera_rect_t standard;
-  // SPIS chip select is asserted this long after FVLD rises (VueBuds' LVLD timer).
+  // VueBuds' delay from FVLD rise to CS low. Not used since PR #32: CS now goes low in
+  // hardware right after line first_line - 1 (or on the FVLD edge when first_line is 0).
   uint16_t fvld_to_cs_us;
   // First transport line DMA receives: lines before it are over before CS is asserted.
   // Their rows in the slot stay zero; the standard region must start at or below it.
