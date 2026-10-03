@@ -45,6 +45,9 @@ ret_code_t hm01b0_get_mode_info(camera_mode_t mode, camera_mode_info_t *info);
 
 hm01b0_state_t hm01b0_get_state(void);
 
+/* Software reset (all registers to defaults, standby). The module has no reset pin. */
+ret_code_t hm01b0_reset(void);
+
 uint8_t hm01b0_reg_read(uint16_t addr);
 void hm01b0_reg_write(uint16_t addr, uint8_t value);
 void hm01b0_reg_update_bits(uint16_t addr, uint8_t mask, uint8_t value);
