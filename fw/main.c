@@ -263,6 +263,10 @@ static void processQueue(void)
 #endif
         cameraInit();
         cameraStartStream();
+#ifdef CAPTURE_STRESS_US
+        extern void stressTestStart(void);
+        stressTestStart();
+#endif
 
         streaming = true;
         // After stream starts disable unnecessary peripherals to save power
@@ -377,6 +381,10 @@ static void processQueue(void)
 
       case EVENT_MONITOR_WAKE:
         monitorWake();
+        break;
+
+      case EVENT_CAMERA_ASLEEP:
+        monitorAsleep();
         break;
 #endif
 

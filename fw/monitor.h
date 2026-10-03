@@ -13,6 +13,7 @@
 
 void monitorStart(void);      // EVENT_MONITOR_START: init the camera, start RTC2
 void monitorWake(void);       // EVENT_MONITOR_WAKE: wake the sensor (HM0360), arm the oldest slot
-void monitorFrameDone(void);  // EVENT_CAMERA_CAPTURE_DONE: sleep the sensor (HM0360), mark the slot ready
+void monitorFrameDone(void);
+void monitorAsleep(void);     // EVENT_CAMERA_ASLEEP: XSLEEP went low on the frame boundary, stop MCLK  // EVENT_CAMERA_CAPTURE_DONE: sleep the sensor (HM0360), mark the slot ready
 
 #endif

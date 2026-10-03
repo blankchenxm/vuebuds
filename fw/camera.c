@@ -3,6 +3,9 @@
 
 #include "nrf_log.h"
 #include "nrf_delay.h"
+#include "app_timer.h"
+#include "app_error.h"
+#include "event.h"
 #include "camera_sensor.h"
 #include "capture.h"
 #include "camera.h"
@@ -25,6 +28,10 @@
 #define CAMERA_BOOT_DELAY_MS 1
 #define CAMERA_DETECT_TIMEOUT_MS 1000
 #define CAMERA_XSLEEP_SETTLE_US 100  // >= 10 us from XSLEEP high to I2C (datasheet table 6.2)
+// Longest wait for a frame boundary. Right after a capture it is ~13 ms away (36 blank
+// lines); requested at another time it is up to two QVGA frames (2 x 103.8 ms) away.
+#define CAMERA_SLEEP_AFTER_FRAME_TIMEOUT_MS 30
+#define CAMERA_SLEEP_ANYTIME_TIMEOUT_MS 250
 
 static bool cameraInitialized = false;
 static const camera_sensor_t *sensor = NULL;
@@ -124,8 +131,7 @@ bool cameraGetFrame(camera_frame_t *frame)
   for (uint8_t i = 0; i < stats->segments; i++) {
     NRF_LOG_RAW_INFO(" %u", stats->segment_bytes[i]);
   }
-  NRF_LOG_RAW_INFO("%s%s%s\n", stats->overflow ? " OVERFLOW" : "", stats->ended_by_line_count ? "" : " (ended by FVLD)",
-                   stats->ok ? "" : ", BAD, dropped");
+  NRF_LOG_RAW_INFO("%s%s\n", stats->overflow ? " OVERFLOW" : "", stats->ok ? "" : ", BAD, dropped");
   if (!stats->ok) {
     // Wrong byte count or overflow (a late CS edge shifted part of the frame): do not send it.
     return false;
@@ -182,23 +188,64 @@ void cameraSensorStream(void)
   sensor->stream_start();
 }
 
-void cameraSleep(bool sleep)
+// HM0360 S2: MCLK runs whenever XSLEEP is high (datasheet: MCLK first, then XSLEEP).
+static enum { CAMERA_AWAKE, CAMERA_FALLING_ASLEEP, CAMERA_ASLEEP } sleepState = CAMERA_AWAKE;
+APP_TIMER_DEF(sleepTimeoutTimer);
+static bool sleepTimerCreated = false;
+static uint32_t sleepTimeoutMs;
+
+// No frame boundary in time (seen on the first wake after the stream starts, when FVLD
+// stays high from one frame to the next): sleep anyway, like PR #26's 30 ms timeout.
+static void sleepTimeout(void *context)
 {
-  // HM0360 S2: MCLK runs whenever XSLEEP is high (datasheet: MCLK first, then XSLEEP).
-  if (sleep) {
-    nrf_gpio_pin_clear(CAM_XSLEEP);
-    nrf_delay_us(CAMERA_XSLEEP_SETTLE_US);
-    capture_mclk_enable(false);
-  } else {
-    capture_mclk_enable(true);
-    nrf_delay_us(CAMERA_XSLEEP_SETTLE_US);
-    nrf_gpio_pin_set(CAM_XSLEEP);
+  if (sleepState == CAMERA_FALLING_ASLEEP) {
+    capture_xsleep(false);
+    NRF_LOG_RAW_INFO("%08d [cam] no frame boundary within %u ms, XSLEEP low anyway\n", systemTimeGetMs(),
+                     sleepTimeoutMs);
+    eventQueuePush(EVENT_CAMERA_ASLEEP);
   }
+}
+
+void cameraWake(void)
+{
+  if (sleepTimerCreated) {
+    app_timer_stop(sleepTimeoutTimer);
+  }
+  capture_mclk_enable(true);
+  nrf_delay_us(CAMERA_XSLEEP_SETTLE_US);
+  capture_xsleep(true);
+  sleepState = CAMERA_AWAKE;
+}
+
+void cameraSleepOnFrameBoundary(void)
+{
+  // XSLEEP low inside the 65 us FVLD-low gap: low anywhere inside a frame makes the next
+  // wake one frame slower (QVGA 131 -> 235 ms to the first FVLD). PPI pulls it low on the
+  // FVLD fall; cameraAsleep() then stops MCLK.
+  if (!sleepTimerCreated) {
+    APP_ERROR_CHECK(app_timer_create(&sleepTimeoutTimer, APP_TIMER_MODE_SINGLE_SHOT, sleepTimeout));
+    sleepTimerCreated = true;
+  }
+  sleepState = CAMERA_FALLING_ASLEEP;
+  sleepTimeoutMs = capture_xsleep_on_frame_boundary() ? CAMERA_SLEEP_AFTER_FRAME_TIMEOUT_MS
+                                                      : CAMERA_SLEEP_ANYTIME_TIMEOUT_MS;
+  APP_ERROR_CHECK(app_timer_start(sleepTimeoutTimer, APP_TIMER_TICKS(sleepTimeoutMs), NULL));
+}
+
+void cameraAsleep(void)
+{
+  if (sleepState != CAMERA_FALLING_ASLEEP) {
+    return;
+  }
+  app_timer_stop(sleepTimeoutTimer);
+  nrf_delay_us(CAMERA_XSLEEP_SETTLE_US);
+  capture_mclk_enable(false);
+  sleepState = CAMERA_ASLEEP;
 }
 
 bool cameraIsAsleep(void)
 {
-  return nrf_gpio_pin_out_read(CAM_XSLEEP) == 0;
+  return sleepState == CAMERA_ASLEEP;
 }
 
 void cameraArmSlot(uint32_t slot, uint8_t skipFrames)
