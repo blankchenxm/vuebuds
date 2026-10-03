@@ -24,8 +24,10 @@ uint16_t cameraModelId(void);              // 0 until cameraInit() found a senso
 const char *cameraModeName(void);
 uint32_t cameraSlotCount(void);            // frame pool slots for the compiled mode
 void cameraSensorStream(void);             // MCLK on + sensor streaming, nothing armed
-void cameraSleep(bool sleep);              // S2: XSLEEP low then MCLK off / MCLK on then XSLEEP high
-bool cameraIsAsleep(void);                 // XSLEEP driven low
+void cameraWake(void);                     // S2 off: MCLK on, then XSLEEP high
+void cameraSleepOnFrameBoundary(void);     // S2 on: XSLEEP low on the next FVLD fall (PPI) ...
+void cameraAsleep(void);                   // ... EVENT_CAMERA_ASLEEP: then MCLK off
+bool cameraIsAsleep(void);                 // XSLEEP low and MCLK off
 void cameraArmSlot(uint32_t slot, uint8_t skipFrames);
 bool cameraSlotFrame(uint32_t slot, camera_frame_t *frame);
 

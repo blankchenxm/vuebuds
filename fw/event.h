@@ -33,6 +33,7 @@ typedef enum
   EVENT_STOP_SENSORS,
   EVENT_MONITOR_START,
   EVENT_MONITOR_WAKE,
+  EVENT_CAMERA_ASLEEP,
 } event_t;
 
 void    eventQueueInit(void);

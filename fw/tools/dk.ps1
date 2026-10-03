@@ -10,6 +10,7 @@
 #   .\tools\dk.ps1 run -Monitor -Mode QQVGA   # Monitor build (CAM_APP=MONITOR), starts at boot
 #   .\tools\dk.ps1 run -Monitor -PeriodMs 0   # Monitor storing every frame (default period 500 ms)
 #   .\tools\dk.ps1 run -Board HM01B0          # pick the DK when both are plugged in (default HM0360)
+#   .\tools\dk.ps1 run -Monitor -Cflags '-DMONITOR_FIRST_FRAMES_TEST -DMONITOR_SKIP_FRAMES=0'  # experiment defines
 param(
   [Parameter(Position = 0)][ValidateSet('build', 'flash-sd', 'flash', 'rtt', 'run', 'camera', 'erase')]
   [string]$Command = 'run',
@@ -21,7 +22,9 @@ param(
   [switch]$Monitor,
   [int]$PeriodMs = -1,
   [switch]$NoLog,
-  [ValidateSet('HM0360', 'HM01B0')][string]$Board = 'HM0360'
+  [ValidateSet('HM0360', 'HM01B0')][string]$Board = 'HM0360',
+  # Extra C defines for experiments, e.g. -Cflags '-DMONITOR_FIRST_FRAMES_TEST -DMONITOR_SKIP_FRAMES=0'
+  [string]$Cflags = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,6 +37,7 @@ if ($ColorBar) { $OutDir += '_colorbar' }
 if ($WiringTest) { $OutDir += '_wiring' }
 if ($Monitor) { $OutDir += '_monitor' }
 if ($PeriodMs -ge 0) { $OutDir += "_p$PeriodMs" }
+if ($Cflags) { $OutDir += '_' + (($Cflags -replace '-D', '' -replace '[^A-Za-z0-9]+', '_').Trim('_').ToLower()) }
 $Hex = Join-Path $FwDir "$OutDir\banji_dev.hex"
 $SdHex = Join-Path $FwDir 'sdk\components\softdevice\s140\hex\s140_nrf52_7.2.0_softdevice.hex'
 # Both DKs run the same firmware (the sensor is detected at boot); they differ in probe and BLE address.
@@ -61,7 +65,8 @@ function Invoke-Build {
   $rtt = if ($NoLog) { '' } else { 'RTT_LOG=1' }
   $pattern = if ($ColorBar) { 'CAM_TEST_PATTERN=COLOR_BAR' } else { '' }
   $fw = $FwDir -replace '\\', '/'
-  $extra = if ($WiringTest) { 'CFLAGS=-DWIRING_TEST ' } else { '' }
+  $defs = (@($(if ($WiringTest) { '-DWIRING_TEST' }), $Cflags) | Where-Object { $_ }) -join ' '
+  $extra = if ($defs) { "CFLAGS='$defs' " } else { '' }
   $app = if ($Monitor) { 'CAM_APP=MONITOR' } else { 'CAM_APP=STREAM' }
   if ($PeriodMs -ge 0) { $app += " MONITOR_PERIOD_MS=$PeriodMs" }
   $cmd = "cd '$fw' && ${extra}make banji_dev OUTPUT_DIRECTORY=$OutDir GNU_INSTALL_ROOT=$gcc/ CAM_MODE=$Mode $app $pattern $rtt -j8"

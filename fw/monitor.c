@@ -10,8 +10,6 @@
 #include "event.h"
 #include "timers.h"
 #include "monitor.h"
-#include "gpio.h"
-#include "nrf_gpio.h"
 
 // 0: no RTC, every frame is stored (the next slot is armed as soon as one is done).
 #ifndef MONITOR_PERIOD_MS
@@ -27,7 +25,6 @@
 #define RTC_PERIOD_TICKS ((MONITOR_PERIOD_MS * RTC_HZ) / 1000u)
 #define RTC_COUNTER_MASK 0xFFFFFFu  // 24-bit counter
 #define HM0360_MODEL_ID 0x0360
-#define MONITOR_FVLD_FALL_TIMEOUT_US 30000u  // > 36 blank lines (13.5 ms) + margin
 
 typedef enum {
   SLOT_EMPTY = 0,
@@ -56,7 +53,6 @@ static uint32_t m_overruns;
 static uint32_t m_dropped;     // bad frames not stored
 static bool m_was_asleep;      // XSLEEP low just before this wake
 static bool m_mclk_was_on;     // MCLK running just before this wake
-static uint32_t m_sleep_wait_us; // HM0360: last line -> FVLD fall, waited before sleeping
 
 static void rtc_handler(nrfx_rtc_int_type_t int_type)
 {
@@ -103,7 +99,7 @@ void monitorStart(void)
   // HM01B0 has no S2: it keeps streaming with MCLK on, a frame is stored when a slot is armed.
   cameraSensorStream();
   if (m_s2) {
-    cameraSleep(true);
+    cameraSleepOnFrameBoundary();
   }
   m_running = true;
 
@@ -148,7 +144,7 @@ void monitorWake(void)
   m_busy = true;
   cameraArmSlot(m_next, m_s2 ? MONITOR_SKIP_FRAMES : 0);
   if (m_s2) {
-    cameraSleep(false);
+    cameraWake();
   }
 }
 
@@ -158,14 +154,9 @@ void monitorFrameDone(void)
     return;
   }
   if (m_s2) {
-    // Sleep on a frame boundary: the capture now ends after the last line, ~13 ms before
-    // FVLD falls. Measured (QVGA): XSLEEP low inside the 65 us FVLD-low gap -> the next wake
-    // gives its first FVLD after 131 ms; low anywhere inside a frame -> 235 ms (one frame more).
-    uint32_t t0 = (uint32_t)systemTimeGetUs();
-    while (nrf_gpio_pin_read(CAM_FRAME_VALID) && (uint32_t)systemTimeGetUs() - t0 < MONITOR_FVLD_FALL_TIMEOUT_US) {
-    }
-    m_sleep_wait_us = (uint32_t)systemTimeGetUs() - t0;
-    cameraSleep(true);
+    // The capture ends after the last line, ~13 ms before the frame boundary (FVLD fall),
+    // where PPI pulls XSLEEP low; monitorAsleep() follows.
+    cameraSleepOnFrameBoundary();
   }
 
   const capture_stats_t *stats = capture_stats();
@@ -194,9 +185,14 @@ void monitorFrameDone(void)
                    stats->arm_to_fvld_us / 1000, now - m_wake_ms);
   NRF_LOG_RAW_INFO(" mean %u, ok, before wake XSLEEP %s MCLK %s\n", frame_mean(m_next), m_was_asleep ? "low" : "HIGH",
                    m_mclk_was_on ? "ON" : "off");
-  if (m_s2) {
-    NRF_LOG_RAW_INFO("%08d [mon]   slept at FVLD fall, %u us after the last line\n", now, m_sleep_wait_us);
-  }
-
   m_next = (m_next + 1) % m_slot_count;
+}
+
+void monitorAsleep(void)
+{
+  cameraAsleep();
+  if (m_running && m_s2 && m_wake_ms) {
+    NRF_LOG_RAW_INFO("%08d [mon]   asleep, MCLK on %u ms\n", systemTimeGetMs(),
+                     systemTimeGetMs() - m_wake_ms);
+  }
 }
