@@ -12,13 +12,16 @@
   - `fw/capture/capture.c`:新增硬件行计数器 TIMER2(计数模式,16 位):PPI 把 LVLD 下降沿接到 COUNT、FVLD 每个边沿接到 CLEAR;CC[0] = `transport_height`,比较中断里拉高 CS 结束最后一段、关掉 FVLD 事件。FVLD↓ 仍是后备结束条件。LVLD 的 GPIOTE 事件从 arm 起一直开着(给计数器用),**中断**仍然只在分段边界附近打开(和原来一样)。
   - `fw/capture/capture.h`:统计里新增 `ended_by_line_count`;开头的时序说明更新。
   - `fw/camera.c`:由 FVLD↓ 结束的帧在 RTT 行末标 `(ended by FVLD)`。
-- **为什么**:HM0360 的 FVLD 在最后一行后还要高 13 ms(36 行空白),两帧之间只低 54–65 µs,FVLD↓ 中断被 SoftDevice 推迟就会晚一个帧周期才结束。按行数结束后,中断有 13 ms 的余量,Monitor 也能早 13 ms 关 MCLK。
-- **和原代码的行为差异**:VueBuds 原来在 FVLD↓ 中断里结束采集;现在最后一行结束就结束,多用了 TIMER2 和 2 个 PPI 通道、多一个 TIMER2 中断(每帧 1 次)。TIMER2 原本留给 UART CLI(libuarte),而 `cliInit()` 在原代码里就是注释掉的;以后要开 CLI 得换一个定时器。
-- **验证**(HM01B0 板):
-  - QVGA 推流 60 s:61 帧,耗时 91695 µs(原来 91705,提前约 10 µs,即 HM01B0 最后一行到 FVLD↓ 的时间),字节数正确,0.96 fps,0 丢包;1 帧由 FVLD 结束(数据正确:BLE 推迟中断时两个中断同时挂起,同优先级下 GPIOTE 中断号更小先执行)。
-  - QQVGA 推流 40 s:161 帧,26180 µs,3.78 fps,0 丢包;2 帧由 FVLD 结束。QQVGA Monitor 正常。
-  - **HM0360 还没测**(模块不响应 I2C,等硬件)。合并前要在 HM0360 上确认:QVGA 耗时约 90 ms(原来 103.7)、长时间推流不再出现耗时翻倍的帧、Monitor 每次唤醒少 13 ms。
-- **遗留 / 下一步**:HM0360 实测;问题 3。
+  - `fw/monitor.c`:HM0360 采完后**等到 FVLD↓(帧边界)再拉低 XSLEEP**(最多等 30 ms),RTT 每帧多一行 `slept at FVLD fall, N us after the last line`。
+- **为什么**:HM0360 的 FVLD 在最后一行后还要高 13 ms(36 行空白),两帧之间只低 54–65 µs,FVLD↓ 中断被 SoftDevice 推迟就会晚一个帧周期才结束。按行数结束后,中断有 13 ms 的余量。
+- **和原代码的行为差异**:VueBuds 原来在 FVLD↓ 中断里结束采集;现在最后一行结束就结束,多用了 TIMER2 和 2 个 PPI 通道、每帧多一个 TIMER2 中断。TIMER2 原本留给 UART CLI(libuarte),`cliInit()` 在原代码里就是注释掉的;以后要开 CLI 得换一个定时器。Monitor 的睡眠时间点和原来一样(帧边界),只是现在是主循环里等 FVLD↓,不是 FVLD↓ 中断之后顺带发生。
+- **验证**:
+  - HM0360 QVGA 推流 60 s,和 main 在同一时间段对比:main 58 帧里 **11 帧耗时翻倍**(206.5 ms)、1 帧 OVERFLOW;本 PR 60 帧**全部 90.9–91.0 ms**(原 103.7),0 翻倍、0 坏帧、0 FVLD 结束,0.99 fps(main 0.94)。
+  - HM0360 QQVGA 推流 40 s:134 帧,全部 45.6–45.8 ms(原 58.7),0 坏帧,3.28 fps。
+  - HM0360 Monitor:QVGA 唤醒 → 第一个 FVLD 131 ms、→ 存完 339 ms;QQVGA 77 / 195 ms;各 20 s 38 帧,0 坏帧、0 overrun。和改动前一样。
+  - HM01B0:QVGA 推流 60 s 61 帧,91695 µs(原 91705),0 丢包;1 帧由 FVLD 结束(数据正确:两个中断同时挂起时 GPIOTE 中断号更小先执行)。QQVGA 推流 161 帧、Monitor 正常。
+- **发现**:**HM0360 进入 S2 的时间点决定下一次唤醒有多快**。QVGA 实测:在 FVLD 低的 65 µs 里拉低 XSLEEP → 下次唤醒 131 ms 出第一个 FVLD;在最后一行之后的空白里拉低 → 235 ms;在下一帧开始后拉低 → 235 ms(都是多一整帧)。所以 Monitor 必须在帧边界睡,原计划"Monitor 早 13 ms 关 MCLK"做不到(MCLK 开的时间和原来一样是 339 / 195 ms)。开始后的第一次睡眠会错过边界(等满 30 ms),之后都正好卡在边界上。
+- **遗留 / 下一步**:等 FVLD↓ 是主循环里忙等约 13 ms;以后可以改成 FVLD↓ → PPI → GPIOTE 直接拉低 XSLEEP(纯硬件,不会错过 65 µs 的窗口)。问题 3。
 
 ## 2026-10-02 · 问题 4:BLE 帧率波动的来源 + 测量工具(PR #24,Issue #23)
 
