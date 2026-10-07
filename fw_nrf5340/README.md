@@ -25,9 +25,11 @@ DK except FVLD → P1.09, LVLD → P1.10, CS loopback jumper P1.06 → P1.07.
 
 ```powershell
 .\tools\dk5340.ps1 run -Seconds 15                 # build + flash + RTT (HM0360 board)
-.\tools\dk5340.ps1 run -Board HM01B0 -Mode QQVGA   # other board / mode
+.\tools\dk5340.ps1 run -Board HM0360B -Mode QQVGA  # other board / mode
 .\tools\dk5340.ps1 run -ColorBar                   # test pattern
 .\tools\dk5340.ps1 run -Monitor -Mode QQVGA        # Monitor (-PeriodMs 0: every frame)
+.\tools\dk5340.ps1 run -Mode VGA                   # HM0360 VGA: ~4 s per frame over BLE;
+                                                   # Monitor keeps 1 slot, default period 1000 ms
 .\tools\dk5340.ps1 run -Cflags 'CAPTURE_STRESS_US=300'   # interrupt stress test
 .\tools\dk5340.ps1 build -Pristine                 # after adding a .conf / overlay file
 ..\host\.venv\Scripts\python.exe ..\host\viewer.py --board hm0360-5340 --rtt --reset
@@ -42,7 +44,7 @@ DK except FVLD → P1.09, LVLD → P1.10, CS loopback jumper P1.06 → P1.07.
 | Board | J-Link SN | BLE address |
 |---|---|---|
 | HM0360 | 1050035314 | DA:E7:DE:69:E3:5E |
-| HM01B0 | 1050017384 | EA:F1:6D:2A:C0:BB |
+| HM0360B (HM01B0 until 10-06) | 1050017384 | EA:F1:6D:2A:C0:BB |
 
 ## Not ported
 

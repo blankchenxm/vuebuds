@@ -29,7 +29,7 @@
 
 #include "camera_sensor.h"
 
-#define CAPTURE_MAX_SEGMENTS 4
+#define CAPTURE_MAX_SEGMENTS 8  // VGA: 480 lines x 640 B = 5 segments of 96 lines
 
 typedef struct {
   uint32_t frame;          // frames completed since capture_init

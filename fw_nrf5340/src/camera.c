@@ -32,10 +32,20 @@
 #define CAMERA_BOOT_DELAY_MS 1
 #define CAMERA_DETECT_TIMEOUT_MS 1000
 #define CAMERA_XSLEEP_SETTLE_US 100  // >= 10 us from XSLEEP high to I2C (datasheet table 6.2)
-// Longest wait for a frame boundary. Right after a capture it is ~13 ms away (36 blank
-// lines); requested at another time it is up to two QVGA frames (2 x 103.8 ms) away.
+// Longest wait for a frame boundary. Right after a capture it is 36 blank lines away
+// (QQVGA / QVGA 376 us lines: 13.5 ms; VGA 768 us lines: 27.6 ms); requested at another
+// time it is up to two frames away (QVGA 2 x 103.8 ms, VGA 2 x 396 ms).
+// After-frame timeout: fw/ waits 30 ms. A frame in which the HM0360's AE changed the gain
+// has no FVLD low gap at its end at all (measured 10-07: 30 of 30 gain changes, 0 of 28
+// unchanged frames), so that wait was always spent in full. 16 ms is just past the 13.5 ms
+// boundary; XSLEEP low then does not delay the next wake (user choice B, 10-07).
+#ifdef CAM_MODE_VGA  // from CMakeLists (CAMERA_MODE is an enum value, invisible to #if)
 #define CAMERA_SLEEP_AFTER_FRAME_TIMEOUT_MS 30
+#define CAMERA_SLEEP_ANYTIME_TIMEOUT_MS 850
+#else
+#define CAMERA_SLEEP_AFTER_FRAME_TIMEOUT_MS 16
 #define CAMERA_SLEEP_ANYTIME_TIMEOUT_MS 250
+#endif
 
 static bool cameraInitialized = false;
 static const camera_sensor_t *sensor = NULL;
@@ -74,7 +84,14 @@ void cameraInit(void)
     return;
   }
 
-  CAPTURE_CHECK(sensor->get_mode_info(CAMERA_MODE, &modeInfo) == NRF_SUCCESS);
+  if (sensor->get_mode_info(CAMERA_MODE, &modeInfo) != NRF_SUCCESS) {
+    // e.g. VGA on an HM01B0 (no such mode): leave the camera off.
+    NRF_LOG_RAW_INFO("[camera] %s has no %s mode, camera not started\n", sensor->name,
+                     camera_mode_name(CAMERA_MODE));
+    sensor = NULL;
+    capture_mclk_enable(false);
+    return;
+  }
   ret_code_t err_code = sensor->init(CAMERA_MODE, CAMERA_TEST_PATTERN);
   if (err_code != NRF_SUCCESS) {
     NRF_LOG_RAW_INFO("[camera] %s init failed: 0x%x\n", sensor->name, err_code);

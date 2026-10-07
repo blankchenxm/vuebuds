@@ -3,7 +3,7 @@
 #   .\tools\dk5340.ps1 flash                     # build + program both cores + reset
 #   .\tools\dk5340.ps1 rtt -Seconds 20           # reset + capture RTT channel 0
 #   .\tools\dk5340.ps1 run -Seconds 20           # build + flash + capture RTT
-#   .\tools\dk5340.ps1 run -Board HM01B0         # pick the DK (default HM0360)
+#   .\tools\dk5340.ps1 run -Board HM0360B        # pick the DK (default HM0360)
 #   .\tools\dk5340.ps1 run -Mode QQVGA -ColorBar # camera mode / color bar test pattern
 #   .\tools\dk5340.ps1 run -Monitor -PeriodMs 0  # Monitor build (CAM_APP=MONITOR)
 #   .\tools\dk5340.ps1 run -Cflags 'CAPTURE_STRESS_US=300'   # extra defines, ';'-separated, no -D
@@ -13,11 +13,11 @@ param(
   [Parameter(Position = 0)][ValidateSet('build', 'flash', 'rtt', 'run')]
   [string]$Command = 'run',
   [int]$Seconds = 15,
-  [ValidateSet('QVGA', 'QQVGA')][string]$Mode = 'QVGA',
+  [ValidateSet('QVGA', 'QQVGA', 'VGA')][string]$Mode = 'QVGA',
   [switch]$ColorBar,
   [switch]$Monitor,
   [int]$PeriodMs = -1,
-  [ValidateSet('HM0360', 'HM01B0')][string]$Board = 'HM0360',
+  [ValidateSet('HM0360', 'HM0360B')][string]$Board = 'HM0360',
   [string]$Cflags = '',
   [switch]$Pristine   # rebuild from scratch (needed after adding a .conf / overlay file)
 )
@@ -31,7 +31,7 @@ $Tc = Join-Path $Ncs 'toolchains\66cdf9b75e'
 $JLinkDir = if ($env:JLINK_DIR) { $env:JLINK_DIR } else { 'C:\Program Files\SEGGER\JLink' }
 $Boards = @{
   'HM0360' = @{ Snr = '1050035314' }
-  'HM01B0' = @{ Snr = '1050017384' }
+  'HM0360B' = @{ Snr = '1050017384' }  # had the HM01B0 until 2026-10-06
 }
 $Snr = $Boards[$Board].Snr
 
@@ -39,7 +39,11 @@ $Variant = $Mode.ToLower()
 if ($ColorBar) { $Variant += '_colorbar' }
 if ($Monitor) { $Variant += '_monitor' }
 if ($PeriodMs -ge 0) { $Variant += "_p$PeriodMs" }
-if ($Cflags) { $Variant += '_' + (($Cflags -replace '[^A-Za-z0-9]+', '_').Trim('_').ToLower()) }
+# Cflags as a short hash: long build paths break the Windows 260-character limit in ninja.
+if ($Cflags) {
+  $md5 = [System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Cflags))
+  $Variant += '_x' + (($md5[0..3] | ForEach-Object { $_.ToString('x2') }) -join '')
+}
 $BuildDir = "$Drive\fw_nrf5340\build_$Variant"
 $RttLog = Join-Path $Repo "fw_nrf5340\build_logs\rtt_$($Board.ToLower()).log"
 

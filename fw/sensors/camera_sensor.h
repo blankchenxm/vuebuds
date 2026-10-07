@@ -18,6 +18,7 @@
 typedef enum {
   CAMERA_MODE_QVGA = 0,
   CAMERA_MODE_QQVGA,
+  CAMERA_MODE_VGA,  // HM0360 only; one frame is 300 KB, so only fw_nrf5340 (nRF5340) builds it
 } camera_mode_t;
 
 typedef enum {

@@ -5,7 +5,7 @@ project(vuebuds_nrf5340)
 
 # Compile-time choices, same names and values as fw/Makefile. dk5340.ps1 passes them as
 # -Dfw_nrf5340_<var>=... (sysbuild hands image-prefixed variables to this image only).
-#   CAM_MODE          QVGA (default) or QQVGA
+#   CAM_MODE          QVGA (default), QQVGA or VGA (HM0360 only)
 #   CAM_TEST_PATTERN  OFF (default), COLOR_BAR or WALKING_1
 #   CAM_APP           STREAM (default) or MONITOR
 #   EXTRA_DEFINES     extra defines, ';'-separated (like fw/'s CFLAGS=-DXXX)
@@ -27,6 +27,7 @@ set(FW ${CMAKE_CURRENT_SOURCE_DIR}/../fw)
 
 target_compile_definitions(app PRIVATE
   CAMERA_MODE=CAMERA_MODE_${CAM_MODE}
+  CAM_MODE_${CAM_MODE}  # for #ifdef: CAMERA_MODE_* are enum values, invisible to #if
   CAMERA_TEST_PATTERN=CAMERA_TEST_PATTERN_${CAM_TEST_PATTERN}
   ${EXTRA_DEFINES}
 )

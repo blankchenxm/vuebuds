@@ -18,7 +18,7 @@ BOARDS = {
     "hm01b0": {"snr": "1050221517", "address": "D6:25:79:FD:6A:6B"},
     "hm0360-5340": {"snr": "1050035314", "address": "DA:E7:DE:69:E3:5E",
                     "device": "nRF5340_xxAA_APP", "family": "nrf53"},
-    "hm01b0-5340": {"snr": "1050017384", "address": "EA:F1:6D:2A:C0:BB",
+    "hm0360b-5340": {"snr": "1050017384", "address": "EA:F1:6D:2A:C0:BB",
                     "device": "nRF5340_xxAA_APP", "family": "nrf53"},
 }
 # J-Link device / nrfjprog family of the nRF52840 boards (entries without "device").

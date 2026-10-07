@@ -13,7 +13,13 @@
 
 // 0: no RTC, every frame is stored (the next slot is armed as soon as one is done).
 #ifndef MONITOR_PERIOD_MS
+#ifdef CAM_MODE_VGA  // from CMakeLists (CAMERA_MODE is an enum value, invisible to #if)
+// A VGA wake keeps MCLK on ~682 ms (285 ms to the first FVLD + 370 ms of lines + the
+// boundary), so 500 ms would skip every other wake (measured 10-07: 19 overruns in 20 s).
+#define MONITOR_PERIOD_MS 1000
+#else
 #define MONITOR_PERIOD_MS 500
+#endif
 #endif
 // Frames to let pass after each HM0360 wake before the one that is stored. 0 since PR #28
 // (user choice 10-02): the 1st frame after a wake matched the 2nd and 3rd (was 1).

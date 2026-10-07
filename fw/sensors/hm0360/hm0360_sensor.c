@@ -68,6 +68,9 @@ ret_code_t hm0360_set_mode(camera_mode_t mode)
     case CAMERA_MODE_QQVGA:
       RETURN_IF_ERROR(hm0360_write_table(hm0360_mode_qqvga, hm0360_mode_qqvga_count));
       break;
+    case CAMERA_MODE_VGA:
+      RETURN_IF_ERROR(hm0360_write_table(hm0360_mode_vga, hm0360_mode_vga_count));
+      break;
     default:
       return NRF_ERROR_INVALID_PARAM;
   }
