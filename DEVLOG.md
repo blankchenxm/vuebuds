@@ -5,7 +5,7 @@
 
 ---
 
-## 2026-10-06 · 移植到 nRF5340 DK:新建 fw_nrf5340/(NCS),两颗传感器推流 + Monitor 全部跑通(PR #?,Issue #33)
+## 2026-10-06 · 移植到 nRF5340 DK:新建 fw_nrf5340/(NCS),两颗传感器推流 + Monitor 全部跑通(PR #34,Issue #33)
 
 - **阶段**:新平台移植(nRF5340 DK,nRF Connect SDK v3.2.1)
 - **改了什么**:
