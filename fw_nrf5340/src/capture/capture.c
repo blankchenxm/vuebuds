@@ -320,9 +320,12 @@ static void spis_init(void)
   SPIS->PSEL.MOSI = CAM_D0;
   SPIS->PSEL.MISO = SPIS_PSEL_MISO_CONNECT_Disconnected << SPIS_PSEL_MISO_CONNECT_Pos;
   SPIS->PSEL.CSN = CAM_SPI_CS_IN;
-  // Mode 0, MSB first (as fw/).
+  // Mode 1 (sample D0 on the falling PCLK edge), MSB first. fw/ uses mode 0 (rising edge),
+  // but on the nRF5340 the rising edge lands where the HM0360 changes D0: its images came
+  // out as random speckle (only the low-transition color bar looked clean). Mode 1 samples
+  // half a clock from that change; both sensors measured clean in both modes (user: 10-06).
   SPIS->CONFIG = (SPIS_CONFIG_ORDER_MsbFirst << SPIS_CONFIG_ORDER_Pos) |
-                 (SPIS_CONFIG_CPHA_Leading << SPIS_CONFIG_CPHA_Pos) |
+                 (SPIS_CONFIG_CPHA_Trailing << SPIS_CONFIG_CPHA_Pos) |
                  (SPIS_CONFIG_CPOL_ActiveHigh << SPIS_CONFIG_CPOL_Pos);
   SPIS->DEF = 0xFF;
   SPIS->ORC = 0xFF;

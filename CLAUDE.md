@@ -70,6 +70,9 @@
   - **仓库路径有空格,Zephyr 设备树预处理会失败**:`dk5340.ps1` 用 `subst V:` 把仓库映射成 `V:\`,编译目录是 `V:\fw_nrf5340\build_<变体>`(已 gitignore)。目录联接(junction)不行,CMake 会解析回真实路径。
   - **sysbuild 下 `-DCAM_MODE=…` 传不到应用镜像**:要写 `-Dfw_nrf5340_CAM_MODE=…`,CMakeLists 里用 `zephyr_get(... SYSBUILD LOCAL)` 读(`dk5340.ps1` 已处理)。新加 `.conf` / overlay 文件后要 `-Pristine`,否则不生效(网络核配置因此没生效过,一帧要传 12 s)。
   - **SPIS DMA 起始地址必须 4 字节对齐**(52840 不需要):`frame_pool_init(frame_bytes, dma_offset)` 把槽前移 0–3 字节。
+  - **SPIS 用模式 1(PCLK 下降沿采样)**,两颗传感器都是(用户 10-06 选方案 A;`fw/` 是模式 0)。模式 0 时 HM0360 实景全是随机噪点,而彩条干净:**彩条位翻转少,不能用来证明采样边沿没问题**,要看实景。
+  - **帧缓冲池 = 剩余全部 RAM**(用户 10-06 决定):`_end` 到 `__kernel_ram_end`,约 413 KB;libc malloc 已关(`CONFIG_COMMON_LIBC_MALLOC=n`),不要再打开,也不要用 `malloc`。编译输出的 RAM 占用不含帧池。
+  - PowerShell 变量不分大小写:`$s` 和 `$S` 是同一个变量。
   - **DPPI 通道组 `CHG[n]` 在它的 EN / DIS 任务被订阅后就写不进去**:先写组成员再订阅。
   - **不要在 BT 回调(BT RX 线程)里直接 `bt_gatt_notify`**:发送队列满时会死锁,放到工作队列。
   - 新板出厂开着 APPROTECT,第一次要 `nrfjprog --recover`(两块都已做)。

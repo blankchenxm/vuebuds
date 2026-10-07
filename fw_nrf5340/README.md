@@ -7,8 +7,11 @@ streaming to `host/viewer.py`, or Monitor (frames cached in RAM, HM0360 S2 sleep
 - `../fw/sensors/` (drivers and register tables) is compiled from `fw/` directly, not copied;
   `src/compat/` provides the nRF5 SDK headers it includes (I2C, time, log, delay).
 - `src/capture/`: MCLK (TIMER0), line counter (TIMER1), 2 µs CS pulse (TIMER2), chip select
-  and XSLEEP fully in hardware through DPPI + GPIOTE + EGU0, SPIS2 at register level.
-  The channel map is at the top of `capture.c`.
+  and XSLEEP fully in hardware through DPPI + GPIOTE + EGU0, SPIS2 at register level in
+  mode 1 (D0 sampled on the falling PCLK edge; mode 0 as in `fw/` gives the HM0360 random
+  bit errors on this chip). The channel map is at the top of `capture.c`.
+- Frame pool: all RAM after the image (`_end` .. `__kernel_ram_end`, about 413 KB); libc
+  malloc is disabled so nothing else claims it. The build's RAM figure excludes the pool.
 - `src/camera.c`, `src/monitor.c`: ports of `fw/camera.c`, `fw/monitor.c`.
 - `src/ble.c`: Zephyr GATT service with the same UUIDs and packet format as `fw/ble_cus.c`.
   The network core runs Nordic's `ipc_radio` image (`sysbuild/ipc_radio/prj.conf`).
