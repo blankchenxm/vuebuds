@@ -5,6 +5,46 @@
 
 ---
 
+## 2026-10-06 · 移植到 nRF5340 DK:新建 fw_nrf5340/(NCS),两颗传感器推流 + Monitor 全部跑通(PR #?,Issue #33)
+
+- **阶段**:新平台移植(nRF5340 DK,nRF Connect SDK v3.2.1)
+- **改了什么**:
+  - 新目录 `fw_nrf5340/`(和 `fw/` 平级,`fw/` 不动):
+    - `CMakeLists.txt`:直接编译 `../fw/sensors/`(驱动和寄存器表只有一份);`CAM_MODE` / `CAM_TEST_PATTERN` / `CAM_APP` / `EXTRA_DEFINES` 编译时选择,名字和 `fw/Makefile` 一样。
+    - `src/compat/`:传感器驱动用到的 nRF5 SDK 头文件(`i2c.h`、`timers.h`、`nrf_log.h`、`nrf_delay.h`、`sdk_errors.h`)的 Zephyr 实现。
+    - `src/capture/`:PR #32 的硬件片选方案改用 DPPI 实现(通道表在 `capture.c` 开头);MCLK = TIMER0、数行 = TIMER1、2 µs CS 脉冲 = TIMER2;SPIS2 直接操作寄存器。
+    - `src/camera.c`、`src/monitor.c`:从 `fw/` 移植,流程和常数不变。
+    - `src/ble.c`:Zephyr GATT,服务 / 特征 UUID、`0xB1`、包格式和 `fw/` 相同;网络核跑 Nordic `ipc_radio`(`sysbuild/ipc_radio/prj.conf`)。
+    - `src/stress_test.c`:`CAPTURE_STRESS_US` 压力测试。
+    - `tools/dk5340.ps1`(build / flash / rtt / run,参数和 `dk.ps1` 对应)、`tools/ncs_env.sh`。
+  - `host/protocol.py`:新增 `hm0360-5340`、`hm01b0-5340` 两块板(J-Link SN、BLE 地址、J-Link 器件名);`viewer.py`、`ble_bench.py` 按板选 RTT 器件名和 nrfjprog family。
+  - `CLAUDE.md`:更正 Obsidian 笔记路径(`D:\Obsidian\Obsidian Vault\…`),加入 nRF5340 一节。
+- **为什么**:换到 nRF5340 DK;nRF5340 不支持 nRF5 SDK / SoftDevice。
+- **接线**:按 Obsidian `nrf5340迁移.md` §2,只改 FVLD → P1.09、LVLD → P1.10、片选回环 P1.06 → P1.07。两块板所有信号实测正常(DMA 字节数、彩条),**没有发现接线问题**。
+- **和 `fw/`(nRF52840)的行为差异**:
+  - **DPPI 通道结构**:DPPI 一个事件只能发布到一个通道、一个任务只能订阅一个通道,所以 FVLD 经 EGU0 分到"开始 / 睡眠"两个受控通道;CS 的三个任务(SET / CLR / OUT)分别用于拉高、帧开始拉低、脉冲结束拉低;数行计数器的"最后一行"和"分段边界"比较各复制一份(CC4 = CC0、CC5 = CC2)。**拉高 CS 的通道一直开着**(`fw/` 放在 run 组里):不采集时 CS 本来就是高,多出来的 SET 没有影响。时序和 PR #32 相同。
+  - **SPIS DMA 起始地址必须 4 字节对齐**(nRF5340 实测,52840 不需要):HM01B0 QQVGA 跳过第 0 行后段 0 从槽 + 162 B 开始,DMA 每帧收到 0 字节;槽地址前移 0–3 字节让 DMA 起点对齐后正常。帧在槽里的布局、发送内容不变。
+  - **帧缓冲池固定 384,000 B**(静态数组,`fw/` 是链接器剩下的全部 RAM,约 208 KB):HM0360 QVGA 5 槽(52840:2)、QQVGA 16 槽(Monitor 上限;52840:10)、HM01B0 QVGA 4 槽。应用核 RAM 用 430 / 448 KB。
+  - **时间基准**:`systemTimeGetMs/Us` 用 Zephyr 内核时钟(RTC1,32.768 kHz 晶振,30.5 µs 分辨率),不是 HFCLK 上的 TIMER1;Monitor 周期显示 500 ms(52840 显示 497–498 ms)。Monitor 唤醒用周期 `k_timer`(`fw/` 用 RTC2 比较),同样不累计漂移。睡眠超时用 `k_timer`(`fw/` 用 app_timer)。
+  - **日志**:`printk` 直接写 RTT(`fw/` 是 NRF_LOG 延迟输出),RTT 上行缓冲 4 KB(`fw/` 512 B + 16 KB 日志缓冲)。采集中断里不打日志。
+  - **BLE 发送**:主线程一次发完一帧(`bt_gatt_notify_cb`,最多 10 个通知在栈里),发完再采下一帧;`fw/` 是主循环轮询 `bleService()` 往 SoftDevice 队列里填(队列 1)。采集和发送的先后关系不变。连接参数请求(7.5–15 ms、5 s 后请求)、MTU 247、数据长度 251 和 `fw/` 一致;本板不主动请求 PHY(电脑端请求了 2M)。连接参数更新时写 `0xFF` 到控制特征改在系统工作队列里通知(在 BT RX 线程里直接通知会在发送队列满时死锁,实测卡死过一次)。
+  - **压力测试**:RTC0、中断优先级 0(高于采集用的 TIMER1 / GPIOTE 中断,优先级 1);`fw/` 是 RTC2、优先级 2。
+  - **没有移植**:`wiring_test.c`;VueBuds 自制板的 PMU、IMU、按键、LED、CLI、关机流程;`cameraDeInit` / `cameraEnableStandbyMode`;音频 / 时间同步控制命令(`fw/` 里也没有实现)。
+  - BLE 地址是随机静态地址:HM0360 板 `DA:E7:DE:69:E3:5E`、HM01B0 板 `EA:F1:6D:2A:C0:BB`。
+- **验证**(两块 nRF5340 DK,REV1,出厂开着 APPROTECT,先 `nrfjprog --recover`):
+  - **型号**:J-Link `1050035314` = HM0360,`1050017384` = HM01B0(开机读 ID 0x0360 / 0x01B0)。
+  - **推流 QVGA**:HM0360 每帧 `dma 38400 38400`、91.1 ms;HM01B0 `39528 39204`、92.6 ms。viewer 26 帧 / 25 s,0 丢包,**session_fps 1.21–1.38**(52840 约 1.0)。
+  - **推流 QQVGA**:HM0360 `19200`,61 帧 0 坏帧,3.77 fps;HM01B0 `19602`,74 帧 0 坏帧,4.16 fps(第一帧 `OVERFLOW, BAD` 在 52840 上也有,10-02 日志)。
+  - **彩条**:HM0360 QVGA 竖条笔直、无噪点。
+  - **压力测试**:HM0360 QVGA `CAPTURE_STRESS_US=300` 42 帧 0 坏帧;HM01B0 QVGA `2000` 24 帧 0 坏帧。
+  - **Monitor**:HM0360 QQVGA 28 帧序号连续,16 槽循环,周期 500 ms,唤醒 → 第一个 FVLD 76 ms → 存完 122 ms,MCLK 每次开 135–136 ms,唤醒前 XSLEEP 低 / MCLK 关;HM0360 QVGA 22 帧 5 槽循环,FVLD 128–130 ms,MCLK 开 233–235 ms;HM01B0 QVGA / QQVGA 各 22 帧,4 / 16 槽循环,MCLK 常开;`-PeriodMs 0` 每帧都存。全部 0 坏帧、0 overrun;开机前几次睡眠超时强制(QQVGA 2 次,QVGA 4 次)。
+- **遗留 / 下一步**:
+  - HM0360 板真实画面噪点很多(彩条完全干净,所以传输没有问题);当时积分时间顶到帧长(0x0110)、模拟增益 0x20,像是场景太暗。需要用户对着亮处确认,排除供电噪声。
+  - 一次刚烧录后紧接着复位,HM0360 整次运行都不应答 I2C,之后重试 6 次都正常,没能复现;和 CLAUDE.md 记录的模块 MCLK 焊点接触不良的现象一致,需要检查接线。
+  - `wiring_test.c` 还没移植。
+
+---
+
 ## 2026-10-02 · 问题 3:HM0360 Monitor 改成不跳帧,每次唤醒 MCLK 少开约 30%(PR #28,Issue #27)
 
 - **阶段**:调查 / 实验工具

@@ -1,0 +1,36 @@
+/*
+ * Camera wiring on the nRF5340 DK (Obsidian note "nrf5340迁移" §2, src/pins.h).
+ * Camera I2C on TWIM1 at P0.26 SDA / P0.27 SCL, 100 kHz like fw/. The DK's default
+ * i2c1 pins (P1.02 / P1.03) are the camera PCLK / D0 here.
+ * SPIS2 (camera data), TIMER0-2, EGU0 and DPPI channels 16-24 are used by the
+ * application at register level (src/capture), so their nodes stay disabled.
+ */
+&pinctrl {
+	i2c1_cam_default: i2c1_cam_default {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 0, 26)>,
+				<NRF_PSEL(TWIM_SCL, 0, 27)>;
+		};
+	};
+
+	i2c1_cam_sleep: i2c1_cam_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 0, 26)>,
+				<NRF_PSEL(TWIM_SCL, 0, 27)>;
+			low-power-enable;
+		};
+	};
+};
+
+&i2c1 {
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+	pinctrl-0 = <&i2c1_cam_default>;
+	pinctrl-1 = <&i2c1_cam_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+/* Arduino SPI (P1.13-P1.15): not used. */
+&spi4 {
+	status = "disabled";
+};

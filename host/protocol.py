@@ -11,11 +11,19 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 DEVICE_NAME = "mustard"
-# Both DKs advertise as "mustard"; pick one by J-Link serial number and BLE address.
+# All DKs advertise as "mustard"; pick one by J-Link serial number and BLE address.
+# nRF52840 DKs run fw/, nRF5340 DKs run fw_nrf5340/ (same BLE protocol).
 BOARDS = {
     "hm0360": {"snr": "1050291681", "address": "C8:1A:80:9C:01:BC"},
     "hm01b0": {"snr": "1050221517", "address": "D6:25:79:FD:6A:6B"},
+    "hm0360-5340": {"snr": "1050035314", "address": "DA:E7:DE:69:E3:5E",
+                    "device": "nRF5340_xxAA_APP", "family": "nrf53"},
+    "hm01b0-5340": {"snr": "1050017384", "address": "EA:F1:6D:2A:C0:BB",
+                    "device": "nRF5340_xxAA_APP", "family": "nrf53"},
 }
+# J-Link device / nrfjprog family of the nRF52840 boards (entries without "device").
+DEFAULT_DEVICE = "NRF52840_XXAA"
+DEFAULT_FAMILY = "nrf52"
 # As advertised by the device; the comment in fw/ble_cus.h lists these bytes in a different order.
 _BASE = "47ea{:04x}-a0e4-554e-5282-0afcd3246970"
 DATA_UUID = _BASE.format(0x1402)

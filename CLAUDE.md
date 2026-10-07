@@ -1,14 +1,16 @@
 # vuebuds(blankchenxm fork)工作说明
 
 用户的 fork,目标:在 **nRF52840 DK** 上复现 VueBuds 的摄像头 + BLE 传图,并把传感器从 HM01B0 迁移到 HM0360。
+2026-10-06 起同时移植到 **nRF5340 DK**(`fw_nrf5340/`,NCS / Zephyr,见下方"nRF5340"一节);`fw/`(nRF52840)保留作对照。
 **和用户交流用中文。**
 **凡是改动 VueBuds 原有设计或行为(采集时序、片选/DMA 方式、中断用法、日志、BLE 协议等),哪怕看起来是修 bug 或加诊断,都要先告诉用户、说明证据和可选方案,由用户决定;"重构"阶段默认保持原设计。PR 和 DEVLOG 里列出所有行为差异。**
 
 ## 设计文档(先读)
 
-- 迁移设计与 TODO:`C:\Users\blank\Documents\Obsidian Vault\Research\Proactive Wearable Agent\02-daily_raw\9.28~10.4\Vuebuds Hm0360迁移对比.md`
+- 迁移设计与 TODO:`D:\Obsidian\Obsidian Vault\Research\Proactive Wearable Agent\02-daily_raw\9.28~10.4\Vuebuds Hm0360迁移对比.md`
   - §1 现有实现 · §1.2 / §3.1 接线表 · **§3.2 HM0360 实测特性与已知问题** · §1.6 RAM 预算 · §4 时钟结论 · §5 模式与帧环形缓存 · §6 重构结构 · §8 TODO
 - 背景:同目录 `01-synthesis/Hardware/HM01B0 vs HM0360.md`、`Camera持续采集Buffer问题.md`
+- nRF5340 移植(四张接线表、移植步骤与结果):`D:\Obsidian\Obsidian Vault\Research\Proactive Wearable Agent\02-daily_raw\10.5~10.11\nrf5340迁移.md`
 - 已定的决定,不要再推翻:
   - MCLK 由 nRF 提供 8 MHz(HM0360 不能用内部时钟跑 1-bit)。
   - 模式在编译时选(`CAM_MODE=QVGA/QQVGA`),**不做运行时切换**。
@@ -27,7 +29,8 @@
 - 帧缓冲池 = 链接脚本里 `__frame_pool_start`(堆尾)到 `__frame_pool_end`(栈底)之间的全部 RAM,约 208 KB。
 - `fw/sdk/`:整份 SDK(已打好 `sdk_patch/nrfx_spis*` 补丁);`fw/_build/` 是作者在 macOS 上的编译产物,不要改;Windows 编译输出在 `fw/_build_win/`(已 gitignore)。
 - `fw/wiring_test.c`:HM0360 接线 / 状态检测工具(`CFLAGS=-DWIRING_TEST` 才编译,开机等 RTT 接上后逐项打印 PASS/FAIL),换模块、怀疑接线时先跑它。
-- `host/`:电脑端 `viewer.py`(BLE 实时预览,空格存图,`--rtt --reset` 合并固件日志)。
+- `fw_nrf5340/`:nRF5340 DK 版(NCS v3.2.1 / Zephyr,sysbuild:应用核 + 网络核 `ipc_radio`)。直接编译 `../fw/sensors/`(不复制),`src/compat/` 提供驱动用到的 nRF5 SDK 头文件;`src/capture/` 是 DPPI 版硬件片选;`src/camera.c`、`src/monitor.c` 从 `fw/` 移植;`src/ble.c` 协议和 `fw/` 相同。说明见 `fw_nrf5340/README.md`。
+- `host/`:电脑端 `viewer.py`(BLE 实时预览,空格存图,`--rtt --reset` 合并固件日志)。`host/protocol.py` 的 `BOARDS` 有四块板:`hm0360`、`hm01b0` 是 52840,`hm0360-5340`、`hm01b0-5340` 是 5340。
 - `hw/`:KiCad 硬件。**用户可能有未提交的 KiCad 改动和锁文件,不要提交、不要还原。**
 
 ## 环境与命令(Windows)
@@ -55,6 +58,22 @@
 - 在 bash 里直接调 make 要额外 CFLAGS 时,用环境变量:`CFLAGS=-DXXX make banji_dev ...`;**不要**在命令行写 `CFLAGS+=`,会覆盖 Makefile 里的全部参数。
 - 设备:**两块 DK 同时接在电脑上**(2026-10-02 起):HM0360 板 J-Link SN `1050291681`、BLE `C8:1A:80:9C:01:BC`;HM01B0 板 SN `1050221517`、BLE `D6:25:79:FD:6A:6B`;芯片都是 nRF52840 **REV3**。`dk.ps1 -Board HM0360|HM01B0`(默认 HM0360)、`viewer.py / ble_receive.py --board hm0360|hm01b0` 选板;直接用 nrfjprog 要加 `--snr`,JLinkRTTLogger 加 `-USB <SN>`,JLink.exe 加 `-USB <SN>`。BLE 名都是 `mustard`(viewer / ble_receive 按名字扫描);数据特征 `47ea1402-a0e4-554e-5282-0afcd3246970`(notify),控制 `47ea1403-…`,写 `0xB1` 开始推流(`ble_cus.h` 注释里的 UUID 字节序是错的)。
 - 诊断:RTT 是主要手段;读 RAM 变量/寄存器可以用 `JLink.exe -CommandFile`(一次会话批量读,比逐条 `nrfjprog --memrd` 快很多);`arm-none-eabi-nm` 查变量地址。
+
+## nRF5340(fw_nrf5340/)
+
+- 环境:NCS v3.2.1 + 工具链装在 `D:\NRFSDK`(`v3.2.1/`、`toolchains/66cdf9b75e/`)。PowerShell 用 `fw_nrf5340\tools\dk5340.ps1`(自己设环境变量,结束后还原);bash 用 `source fw_nrf5340/tools/ncs_env.sh`。
+- 常用(在 `fw_nrf5340/` 下):`.\tools\dk5340.ps1 run [-Board HM0360|HM01B0] [-Mode QQVGA] [-ColorBar] [-Monitor] [-PeriodMs 0] [-Cflags 'A=1;B'] [-Pristine] [-Seconds N]`;`build` / `flash` / `rtt` 单独用。viewer:`--board hm0360-5340|hm01b0-5340`。
+- 设备:HM0360 板 J-Link SN `1050035314`、BLE `DA:E7:DE:69:E3:5E`;HM01B0 板 SN `1050017384`、BLE `EA:F1:6D:2A:C0:BB`;芯片 nRF5340 **REV1**。RTT / JLink 器件名 `nRF5340_xxAA_APP`,nrfjprog `-f nrf53`。
+- 接线(和 52840 的差别):FVLD → **P1.09**、LVLD → **P1.10**、片选回环跳线 **P1.06 → P1.07**;其余(PCLK P1.02、D0 P1.03、MCLK P1.08、XSLEEP P1.04、RST P1.05、I2C P0.26 / P0.27)不变。引脚在 `src/pins.h`,I2C 在 `boards/nrf5340dk_nrf5340_cpuapp.overlay`。
+- 外设占用:TIMER0 = MCLK、TIMER1 = 数行、TIMER2 = CS 脉冲、EGU0 = FVLD 分发、DPPI 通道 16–24 / 组 3–5、SPIS2(寄存器级)、TWIM1、RTC0 = 压力测试。应用核只有 TIMER0–2、RTC0–1(RTC1 是内核时钟)。
+- 坑:
+  - **仓库路径有空格,Zephyr 设备树预处理会失败**:`dk5340.ps1` 用 `subst V:` 把仓库映射成 `V:\`,编译目录是 `V:\fw_nrf5340\build_<变体>`(已 gitignore)。目录联接(junction)不行,CMake 会解析回真实路径。
+  - **sysbuild 下 `-DCAM_MODE=…` 传不到应用镜像**:要写 `-Dfw_nrf5340_CAM_MODE=…`,CMakeLists 里用 `zephyr_get(... SYSBUILD LOCAL)` 读(`dk5340.ps1` 已处理)。新加 `.conf` / overlay 文件后要 `-Pristine`,否则不生效(网络核配置因此没生效过,一帧要传 12 s)。
+  - **SPIS DMA 起始地址必须 4 字节对齐**(52840 不需要):`frame_pool_init(frame_bytes, dma_offset)` 把槽前移 0–3 字节。
+  - **DPPI 通道组 `CHG[n]` 在它的 EN / DIS 任务被订阅后就写不进去**:先写组成员再订阅。
+  - **不要在 BT 回调(BT RX 线程)里直接 `bt_gatt_notify`**:发送队列满时会死锁,放到工作队列。
+  - 新板出厂开着 APPROTECT,第一次要 `nrfjprog --recover`(两块都已做)。
+  - PowerShell 里别把 `dk5340.ps1 flash` 的输出接到 `Select-Object -First N`:管道提前结束会杀掉 west,结果只烧了网络核、没烧应用核。
 
 ## 已知坑
 
