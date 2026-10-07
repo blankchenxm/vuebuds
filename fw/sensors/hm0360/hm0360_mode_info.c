@@ -31,6 +31,16 @@ ret_code_t hm0360_get_mode_info(camera_mode_t mode, camera_mode_info_t *info)
       };
       return NRF_SUCCESS;
 
+    case CAMERA_MODE_VGA:
+      *info = (camera_mode_info_t) {
+        .transport_width = 640,
+        .transport_height = 480,
+        .standard = { .x = 0, .y = 0, .width = 640, .height = 480 },
+        .fvld_to_cs_us = 20,
+        .first_line = 0,
+      };
+      return NRF_SUCCESS;
+
     default:
       return NRF_ERROR_INVALID_PARAM;
   }

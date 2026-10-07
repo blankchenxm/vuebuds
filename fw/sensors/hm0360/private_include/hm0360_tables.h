@@ -12,6 +12,8 @@ extern const hm0360_regval_t hm0360_mode_qvga[];
 extern const size_t hm0360_mode_qvga_count;
 extern const hm0360_regval_t hm0360_mode_qqvga[];
 extern const size_t hm0360_mode_qqvga_count;
+extern const hm0360_regval_t hm0360_mode_vga[];
+extern const size_t hm0360_mode_vga_count;
 
 extern const hm0360_regval_t hm0360_interface_1bit[];
 extern const size_t hm0360_interface_1bit_count;

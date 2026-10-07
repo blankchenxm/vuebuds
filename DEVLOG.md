@@ -5,6 +5,88 @@
 
 ---
 
+## 2026-10-07 · nRF5340:HM0360 VGA(推流 + Monitor)、帧边界超时 30 → 16 ms、第二块板换成 HM0360(PR #34,Issue #33)
+
+- **阶段**:新功能(VGA)/ 修 bug(Monitor 帧边界)
+- **改了什么**:
+  - `fw/sensors/`(两个平台共用):`camera_sensor.h` 新增 `CAMERA_MODE_VGA`;`hm0360_modes.c` 新增 VGA 表(不子采样,行长 768、帧长 516、MAX_INTG 512);`hm0360_mode_info.c` / `hm0360_sensor.c` 支持 VGA。HM01B0 没有 VGA(返回不支持)。`fw/`(52840)不编 VGA(一帧 300 KB),编译确认不受影响。
+  - `fw_nrf5340/src/camera.c`:帧边界超时(采完后)**30 → 16 ms**(用户 10-07 选方案 B),VGA 用 30 ms;其它时候的超时 VGA 用 850 ms(两帧);传感器没有所选模式时不再 panic,只打日志、不开相机。
+  - `fw_nrf5340/src/monitor.c`:VGA 默认周期 **1000 ms**(QQVGA / QVGA 仍 500 ms,`-PeriodMs` 可覆盖)。
+  - `fw_nrf5340/src/capture/capture.h`:`CAPTURE_MAX_SEGMENTS` 4 → 8(VGA 5 段)。
+  - `fw_nrf5340/CMakeLists.txt`:`CAM_MODE=VGA`;额外定义 `CAM_MODE_<模式>` 宏给 `#ifdef` 用(`CAMERA_MODE_*` 是枚举,`#if` 里看不到,会被当成 0)。
+  - `fw_nrf5340/tools/dk5340.ps1`:`-Mode VGA`;板名 `HM01B0` → **`HM0360B`**(SN 1050017384,10-07 起接 HM0360);`-Cflags` 的编译目录名改成短哈希(目录名太长超过 Windows 路径上限会编译失败)。`host/protocol.py`:`hm01b0-5340` → `hm0360b-5340`。
+- **为什么**:
+  - **帧边界有时等不到的原因**(10-07 查清):**某一帧里 HM0360 的 AE 调了增益,这一帧末尾就没有 FVLD 低脉冲**,FVLD 一直高到下一帧结束(晚 58.68 ms)。DWT 精确计时 + 每帧读 AE 寄存器,59 次唤醒:增益变了 30/30 次没有帧边界,没变 28/28 次都有;曝光一直顶在 152 行、帧长寄存器 156 不变。场景暗或闪时 AE 调得多,超时就多。之前"500 ms 周期锁在坏相位"的推测是错的。52840 用同样的传感器设置,应该也有,未验证。
+  - 那一帧只能等超时强制睡眠;实测强制睡眠不会让下次唤醒多等一帧(第一个 FVLD 仍是 74.35 ms),所以把超时缩到刚过正常帧边界(13.5 ms)的 16 ms。
+  - VGA:5340 的 RAM 够放一帧(用户 10-07 要求);Monitor 只存 1 个槽(用户同意)。
+- **和原代码的行为差异**:超时 30 → 16 ms(仅 5340);新增 VGA 模式;VGA Monitor 周期 1000 ms、1 个槽。
+- **验证**(两块板都是 HM0360:`HM0360` = 1050035314、`HM0360B` = 1050017384):
+
+| 测试 | HM0360 | HM0360B |
+|---|---|---|
+| 推流 QVGA | 19 帧 0 坏帧,1.01 fps | 19 帧 0 坏帧,1.34 fps |
+| 推流 QQVGA | 36 帧 0 坏帧,3.71 fps | 62 帧 0 坏帧,3.83 fps |
+| 推流 VGA | 7 帧,每帧 `61440` × 5 段,370 ms,0 丢包,0.25 fps(1270 包 / 帧,约 4 s) | 7 帧,同左,画面清楚 |
+| Monitor QQVGA | 38 帧 / 16 槽,MCLK 开 135–138 ms | 38 帧,137–140 ms |
+| Monitor QVGA | 38 帧 / 5 槽,232–235 ms | 38 帧,234–238 ms |
+| Monitor VGA(1000 ms) | 18 帧 / 1 槽,0 overrun,唤醒 → FVLD 285 ms → 存完 656 ms,MCLK 开 681–686 ms | 18 帧,689 ms |
+| 压力测试 | VGA 300 µs:7 帧 0 坏帧 | QVGA 2000 µs:17 帧 0 坏帧 |
+
+  - 超时改 16 ms 前,缺帧边界的帧 MCLK 开 152–154 ms;改后同样场景 135–140 ms。全部 Monitor 0 坏帧、0 overrun,唤醒前 XSLEEP 低 / MCLK 关。
+  - VGA 500 ms 周期实测:每次唤醒 682 ms > 500 ms,20 s 里 19 次 overrun,所以默认 1000 ms。
+  - VGA 帧长没有被传感器抬高:最后一行到 FVLD 下降约 26 ms ≈ 36 行 × 768 µs。
+  - 52840 `fw/` 用改过的 `fw/sensors/` 编译通过。
+- **遗留 / 下一步**:52840 上是否也有"AE 调增益时没有帧边界"未验证;`wiring_test.c` 仍未移植。
+
+---
+
+## 2026-10-06 · 移植到 nRF5340 DK:新建 fw_nrf5340/(NCS),两颗传感器推流 + Monitor 全部跑通(PR #34,Issue #33)
+
+- **阶段**:新平台移植(nRF5340 DK,nRF Connect SDK v3.2.1)
+- **改了什么**:
+  - 新目录 `fw_nrf5340/`(和 `fw/` 平级,`fw/` 不动):
+    - `CMakeLists.txt`:直接编译 `../fw/sensors/`(驱动和寄存器表只有一份);`CAM_MODE` / `CAM_TEST_PATTERN` / `CAM_APP` / `EXTRA_DEFINES` 编译时选择,名字和 `fw/Makefile` 一样。
+    - `src/compat/`:传感器驱动用到的 nRF5 SDK 头文件(`i2c.h`、`timers.h`、`nrf_log.h`、`nrf_delay.h`、`sdk_errors.h`)的 Zephyr 实现。
+    - `src/capture/`:PR #32 的硬件片选方案改用 DPPI 实现(通道表在 `capture.c` 开头);MCLK = TIMER0、数行 = TIMER1、2 µs CS 脉冲 = TIMER2;SPIS2 直接操作寄存器。
+    - `src/camera.c`、`src/monitor.c`:从 `fw/` 移植,流程和常数不变。
+    - `src/ble.c`:Zephyr GATT,服务 / 特征 UUID、`0xB1`、包格式和 `fw/` 相同;网络核跑 Nordic `ipc_radio`(`sysbuild/ipc_radio/prj.conf`)。
+    - `src/stress_test.c`:`CAPTURE_STRESS_US` 压力测试。
+    - `tools/dk5340.ps1`(build / flash / rtt / run,参数和 `dk.ps1` 对应)、`tools/ncs_env.sh`。
+  - `host/protocol.py`:新增 `hm0360-5340`、`hm01b0-5340` 两块板(J-Link SN、BLE 地址、J-Link 器件名);`viewer.py`、`ble_bench.py` 按板选 RTT 器件名和 nrfjprog family。
+  - `CLAUDE.md`:更正 Obsidian 笔记路径(`D:\Obsidian\Obsidian Vault\…`),加入 nRF5340 一节。
+- **为什么**:换到 nRF5340 DK;nRF5340 不支持 nRF5 SDK / SoftDevice。
+- **接线**:按 Obsidian `nrf5340迁移.md` §2,只改 FVLD → P1.09、LVLD → P1.10、片选回环 P1.06 → P1.07。两块板所有信号实测正常(DMA 字节数、彩条),**没有发现接线问题**。
+- **和 `fw/`(nRF52840)的行为差异**:
+  - **DPPI 通道结构**:DPPI 一个事件只能发布到一个通道、一个任务只能订阅一个通道,所以 FVLD 经 EGU0 分到"开始 / 睡眠"两个受控通道;CS 的三个任务(SET / CLR / OUT)分别用于拉高、帧开始拉低、脉冲结束拉低;数行计数器的"最后一行"和"分段边界"比较各复制一份(CC4 = CC0、CC5 = CC2)。**拉高 CS 的通道一直开着**(`fw/` 放在 run 组里):不采集时 CS 本来就是高,多出来的 SET 没有影响。时序和 PR #32 相同。
+  - **SPIS DMA 起始地址必须 4 字节对齐**(nRF5340 实测,52840 不需要):HM01B0 QQVGA 跳过第 0 行后段 0 从槽 + 162 B 开始,DMA 每帧收到 0 字节;槽地址前移 0–3 字节让 DMA 起点对齐后正常。帧在槽里的布局、发送内容不变。
+  - **SPIS 改成模式 1(PCLK 下降沿采样 D0)**,两颗传感器都用(用户 10-06 选方案 A;`fw/` 是模式 0、上升沿)。证据:模式 0 下 HM0360 实景画面全是随机噪点、几乎看不清,而彩条干净。原因是 5340 的上升沿采样点正好落在 HM0360 切换 D0 的时刻,彩条位翻转很少所以看不出。改下降沿(离 D0 变化半个时钟)后 HM0360 QVGA / QQVGA 画面清楚;HM01B0 两种边沿都正常。
+  - **帧缓冲池 = 剩余全部 RAM**(用户 10-06 决定,和 `fw/` 的思路一样):从镜像结尾 `_end` 到 RAM 区结尾 `__kernel_ram_end`。Zephyr 的栈、堆都静态分配在镜像里;libc `malloc` 关掉(`CONFIG_COMMON_LIBC_MALLOC=n`,原本它会把这段当堆;没有代码用 malloc)。应用核 RAM 448 KB(512 KB 里最后 64 KB 是和网络核共享的 IPC 区;网络核自己的 64 KB 应用核访问不到),镜像占 45.7 KB,**帧池 413,000 B**:HM0360 QVGA 5 槽(52840:2)、QQVGA 21 槽(Monitor 最多用 16;52840:10)、HM01B0 QVGA 5 槽。
+  - **时间基准**:`systemTimeGetMs/Us` 用 Zephyr 内核时钟(RTC1,32.768 kHz 晶振,30.5 µs 分辨率),不是 HFCLK 上的 TIMER1;Monitor 周期显示 500 ms(52840 显示 497–498 ms)。Monitor 唤醒用周期 `k_timer`(`fw/` 用 RTC2 比较),同样不累计漂移。睡眠超时用 `k_timer`(`fw/` 用 app_timer)。
+  - **日志**:`printk` 直接写 RTT(`fw/` 是 NRF_LOG 延迟输出),RTT 上行缓冲 4 KB(`fw/` 512 B + 16 KB 日志缓冲)。采集中断里不打日志。
+  - **BLE 发送**:主线程一次发完一帧(`bt_gatt_notify_cb`,最多 10 个通知在栈里),发完再采下一帧;`fw/` 是主循环轮询 `bleService()` 往 SoftDevice 队列里填(队列 1)。采集和发送的先后关系不变。连接参数请求(7.5–15 ms、5 s 后请求)、MTU 247、数据长度 251 和 `fw/` 一致;本板不主动请求 PHY(电脑端请求了 2M)。连接参数更新时写 `0xFF` 到控制特征改在系统工作队列里通知(在 BT RX 线程里直接通知会在发送队列满时死锁,实测卡死过一次)。
+  - **压力测试**:RTC0、中断优先级 0(高于采集用的 TIMER1 / GPIOTE 中断,优先级 1);`fw/` 是 RTC2、优先级 2。
+  - **没有移植**:`wiring_test.c`;VueBuds 自制板的 PMU、IMU、按键、LED、CLI、关机流程;`cameraDeInit` / `cameraEnableStandbyMode`;音频 / 时间同步控制命令(`fw/` 里也没有实现)。
+  - BLE 地址是随机静态地址:HM0360 板 `DA:E7:DE:69:E3:5E`、HM01B0 板 `EA:F1:6D:2A:C0:BB`。
+- **验证**(两块 nRF5340 DK,REV1,出厂开着 APPROTECT,先 `nrfjprog --recover`):
+  - **型号**:J-Link `1050035314` = HM0360,`1050017384` = HM01B0(开机读 ID 0x0360 / 0x01B0)。
+  - **推流 QVGA**:HM0360 每帧 `dma 38400 38400`、91.1 ms;HM01B0 `39528 39204`、92.6 ms。viewer 26 帧 / 25 s,0 丢包,**session_fps 1.21–1.38**(52840 约 1.0)。
+  - **推流 QQVGA**:HM0360 `19200`,61 帧 0 坏帧,3.77 fps;HM01B0 `19602`,74 帧 0 坏帧,4.16 fps(第一帧 `OVERFLOW, BAD` 在 52840 上也有,10-02 日志)。
+  - **彩条**:HM0360 QVGA 竖条笔直、无噪点。
+  - **压力测试**:HM0360 QVGA `CAPTURE_STRESS_US=300` 42 帧 0 坏帧;HM01B0 QVGA `2000` 24 帧 0 坏帧。
+  - **Monitor**:HM0360 QQVGA 28 帧序号连续,16 槽循环,周期 500 ms,唤醒 → 第一个 FVLD 76 ms → 存完 122 ms,MCLK 每次开 135–136 ms,唤醒前 XSLEEP 低 / MCLK 关;HM0360 QVGA 22 帧 5 槽循环,FVLD 128–130 ms,MCLK 开 233–235 ms;HM01B0 QVGA / QQVGA 各 22 帧,4 / 16 槽循环,MCLK 常开;`-PeriodMs 0` 每帧都存。全部 0 坏帧、0 overrun;开机前几次睡眠超时强制(QQVGA 2 次,QVGA 4 次)。
+  - **改成模式 1 + 帧池用满剩余 RAM 后的回归**(上面的数字是改之前测的):
+    - 推流:HM0360 QVGA 16 帧 0 坏帧(5 槽);HM0360 QQVGA 板子静止 40 s 139 帧 0 坏帧、0 丢包、3.75 fps(21 槽);HM01B0 QVGA 14 帧,只有第 1 帧 `OVERFLOW`(5 槽);HM01B0 QQVGA 49 帧,只有第 1 帧 `OVERFLOW`。实景画面两颗传感器都清楚。
+    - 压力测试 `CAPTURE_STRESS_US=2000`:HM0360 QVGA 22 帧、HM01B0 QVGA 22 帧,都是 0 坏帧(HM0360 第一次跑 2000 µs)。
+    - Monitor:HM0360 QQVGA 28 帧序号连续、16 槽循环、周期 500 ms、MCLK 开 135–137 ms;HM0360 QVGA 28 帧、5 槽循环、MCLK 开 232–235 ms;HM01B0 QVGA 29 帧、5 槽循环。全部 0 坏帧、0 overrun,唤醒前 XSLEEP 低 / MCLK 关。有一次 HM0360 QQVGA 每次睡眠都超时(MCLK 开 153 ms),马上重跑两次都正常,和下面的 FVLD 接触问题一致。
+- **遗留 / 下一步**:
+  - ~~HM0360 噪点是场景太暗~~:这个判断是错的。真正原因是 SPIS 采样边沿,已改成模式 1(见上)。
+  - HM0360 板移动时偶发一帧采集跨好几帧(QQVGA 一帧最长 4.5 s,`OVERFLOW`):数行计数在帧中间被清零,像是 FVLD / LVLD 跳线接触不良。板子静止 40 s 139 帧 0 坏帧。建议检查 P1.09 / P1.10 两根线。
+  - 模式 1 下 HM01B0 QVGA 推流第 1 帧也会 `OVERFLOW, BAD`(只有第 1 帧,丢弃不发;QQVGA 第 1 帧在 52840 上也有)。
+  - 一次刚烧录后紧接着复位,HM0360 整次运行都不应答 I2C,之后重试 6 次都正常,没能复现;和 CLAUDE.md 记录的模块 MCLK 焊点接触不良的现象一致,需要检查接线。
+  - `wiring_test.c` 还没移植。
+
+---
+
 ## 2026-10-02 · 问题 3:HM0360 Monitor 改成不跳帧,每次唤醒 MCLK 少开约 30%(PR #28,Issue #27)
 
 - **阶段**:调查 / 实验工具

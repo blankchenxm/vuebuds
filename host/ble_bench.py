@@ -30,13 +30,15 @@ HERE = pathlib.Path(__file__).resolve().parent
 JLINK_DIR = pathlib.Path(r"C:\Program Files\SEGGER\JLink")
 
 
-def start_rtt(snr: str, out_file: pathlib.Path) -> subprocess.Popen:
+def start_rtt(board: dict, out_file: pathlib.Path) -> subprocess.Popen:
     # Reset first: nrfjprog and the RTT logger cannot share the probe.
-    subprocess.run(["nrfjprog", "-f", "nrf52", "--snr", snr, "--reset"], capture_output=True)
+    snr = board["snr"]
+    family = board.get("family", protocol.DEFAULT_FAMILY)
+    subprocess.run(["nrfjprog", "-f", family, "--snr", snr, "--reset"], capture_output=True)
     if out_file.exists():
         out_file.unlink()
     return subprocess.Popen(
-        [str(JLINK_DIR / "JLinkRTTLogger.exe"), "-USB", snr, "-Device", "NRF52840_XXAA", "-If", "SWD",
+        [str(JLINK_DIR / "JLinkRTTLogger.exe"), "-USB", snr, "-Device", board.get("device", protocol.DEFAULT_DEVICE), "-If", "SWD",
          "-Speed", "4000", "-RTTChannel", "0", str(out_file)],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
 
@@ -101,7 +103,7 @@ def main():
     stamp = f"{datetime.datetime.now():%Y%m%d-%H%M%S}"
     rtt_file = HERE / "logs" / f"bench-rtt-{stamp}.log"
     rtt_file.parent.mkdir(exist_ok=True)
-    rtt = start_rtt(board["snr"], rtt_file)
+    rtt = start_rtt(board, rtt_file)
     time.sleep(2.0)  # firmware boot + advertising
     try:
         t0, mtu, arrivals, frames, asm = asyncio.run(stream(board["address"], args.duration))

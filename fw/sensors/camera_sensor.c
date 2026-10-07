@@ -58,6 +58,7 @@ const char *camera_mode_name(camera_mode_t mode)
   switch (mode) {
     case CAMERA_MODE_QVGA:  return "QVGA";
     case CAMERA_MODE_QQVGA: return "QQVGA";
+    case CAMERA_MODE_VGA:   return "VGA";
     default:                return "?";
   }
 }

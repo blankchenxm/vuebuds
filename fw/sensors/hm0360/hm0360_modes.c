@@ -328,6 +328,26 @@ const hm0360_regval_t hm0360_mode_qqvga[] = {
 const size_t hm0360_mode_qqvga_count = HM0360_TABLE_COUNT(hm0360_mode_qqvga);
 
 /*
+ * VGA (full array, no sub-sampling), nRF5340 only (a frame is 300 KB). One line is
+ * 640 px x 8 bit / 8 MHz = 640 us of data, so the line length is the datasheet default
+ * 768 (128 us of horizontal blanking). Frame length = output lines + 36 like the other
+ * modes: 516 x 768 us = 396 ms (2.5 fps). MAX_INTG = frame length - 4.
+ */
+const hm0360_regval_t hm0360_mode_vga[] = {
+  HM0360_REG_WRITE(HM0360_REG_H_SUBSAMPLE, HM0360_SUB_FULL),
+  HM0360_REG_WRITE(HM0360_REG_V_SUBSAMPLE, HM0360_SUB_FULL),
+  HM0360_REG_WRITE(HM0360_REG_BINNING_MODE, HM0360_BINNING_OFF),
+  HM0360_REG_WRITE(HM0360_REG_FRAME_LENGTH_LINES_H, 0x02),
+  HM0360_REG_WRITE(HM0360_REG_FRAME_LENGTH_LINES_L, 0x04),  // 516
+  HM0360_REG_WRITE(HM0360_REG_LINE_LENGTH_PCK_H, 0x03),
+  HM0360_REG_WRITE(HM0360_REG_LINE_LENGTH_PCK_L, 0x00),     // 768
+  HM0360_REG_WRITE(HM0360_REG_MAX_INTG_H, 0x02),
+  HM0360_REG_WRITE(HM0360_REG_MAX_INTG_L, 0x00),            // 512
+  HM0360_REG_WRITE(HM0360_REG_COMMAND_UPDATE, HM0360_COMMAND_UPDATE_APPLY),
+};
+const size_t hm0360_mode_vga_count = HM0360_TABLE_COUNT(hm0360_mode_vga);
+
+/*
  * 1-bit serial output on D0, MSB first, PCLKO gated by line (datasheet table 6.5),
  * so PCLKO only toggles while a line is valid, like the HM01B0 setup.
  * Sensor_Core = MCLK / 8 = 1 MHz; serial PCLKO = 8 x Sensor_Core = 8 MHz (SPIS limit).

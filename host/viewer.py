@@ -49,20 +49,21 @@ class SessionLog:
 class RttTap:
     """Runs JLinkRTTLogger into a file and forwards each new line to the session log."""
 
-    def __init__(self, log: SessionLog, out_file: pathlib.Path, reset: bool, snr: str | None = None):
+    def __init__(self, log: SessionLog, out_file: pathlib.Path, reset: bool, snr: str | None = None,
+                 device: str = protocol.DEFAULT_DEVICE, family: str = protocol.DEFAULT_FAMILY):
         self.log = log
         self.out_file = out_file
         self._stop = threading.Event()
         if reset:
             # Reset before attaching so the log starts at boot; nrfjprog and the logger can't share the probe.
             probe = ["--snr", snr] if snr else []
-            rc = subprocess.run(["nrfjprog", "-f", "nrf52", *probe, "--reset"], capture_output=True).returncode
+            rc = subprocess.run(["nrfjprog", "-f", family, *probe, "--reset"], capture_output=True).returncode
             log("rtt", f"target reset (nrfjprog rc={rc})")
         if out_file.exists():
             out_file.unlink()
         probe = ["-USB", snr] if snr else []
         self._proc = subprocess.Popen(
-            [str(JLINK_DIR / "JLinkRTTLogger.exe"), *probe, "-Device", "NRF52840_XXAA", "-If", "SWD",
+            [str(JLINK_DIR / "JLinkRTTLogger.exe"), *probe, "-Device", device, "-If", "SWD",
              "-Speed", "4000", "-RTTChannel", "0", str(out_file)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
         self._thread = threading.Thread(target=self._tail, daemon=True)
@@ -225,7 +226,9 @@ def main():
     log = SessionLog(HERE / "logs" / f"session-{stamp}.log")
     log("host", f"session log: {log.path}")
 
-    rtt = RttTap(log, HERE / "logs" / f"rtt-{stamp}.raw.log", args.reset, board.get("snr")) if args.rtt else None
+    rtt = RttTap(log, HERE / "logs" / f"rtt-{stamp}.raw.log", args.reset, board.get("snr"),
+                 board.get("device", protocol.DEFAULT_DEVICE),
+                 board.get("family", protocol.DEFAULT_FAMILY)) if args.rtt else None
     rx = BleReceiver(log, args.name, args.address)
     fps = FpsMeter()
 
