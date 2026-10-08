@@ -5,10 +5,14 @@
                  BFMatcher (Hamming) -> findHomography (RANSAC) -> warpPerspective, no
                  cropping; when it fails the two pictures are used as they are
 
-Both take and return 8-bit grayscale images. Run on pairs saved by stereo.py:
-  python stitch.py captures/stereo                 # every pair: reads left.png / right.png, writes stitch_*.png
-  python stitch.py captures/stereo/<pair dir>      # one pair
+Both take and return 8-bit grayscale images. Run on pairs saved by stereo.py (each pair's
+stitch_opencv.png / stitch_orb.png is written next to its left.png / right.png):
+  python stitch.py captures/stereo/<pair dir>      # window: left | right originals, stitch results on the right
+  python stitch.py captures/stereo                 # every pair, one at a time (Space / left click: next,
+                                                   #   p / right click: previous, q: quit)
+  python stitch.py captures/stereo --no-show       # no window: stitch all, print the success counts
 """
+import argparse
 import pathlib
 import sys
 import time
@@ -124,7 +128,7 @@ def stitch_all(left: np.ndarray, right: np.ndarray) -> list[StitchResult]:
     return [stitch_opencv(left, right), stitch_orb(left, right)]
 
 
-def stitch_dir(d: pathlib.Path) -> list[StitchResult]:
+def stitch_dir(d: pathlib.Path) -> tuple[np.ndarray, np.ndarray, list[StitchResult]]:
     """Stitch d/left.png + d/right.png; writes stitch_<method>.png (removes a stale one on failure)."""
     left = cv2.imread(str(d / "left.png"), cv2.IMREAD_GRAYSCALE)
     right = cv2.imread(str(d / "right.png"), cv2.IMREAD_GRAYSCALE)
@@ -135,23 +139,99 @@ def stitch_dir(d: pathlib.Path) -> list[StitchResult]:
             cv2.imwrite(str(out), r.image)
         elif out.exists():
             out.unlink()
-    return results
+    return left, right, results
+
+
+# ---- viewer: originals on the left, stitch results on the right ----
+
+WINDOW = "vuebuds stitch"
+
+
+def _fit(img: np.ndarray, w: int, h: int) -> np.ndarray:
+    """img scaled to fit inside w x h, on a black w x h BGR tile (top-left aligned)."""
+    tile = np.zeros((h, w, 3), np.uint8)
+    scale = min(w / img.shape[1], h / img.shape[0])
+    size = (max(1, round(img.shape[1] * scale)), max(1, round(img.shape[0] * scale)))
+    small = cv2.resize(img, size, interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+    tile[:size[1], :size[0]] = cv2.cvtColor(small, cv2.COLOR_GRAY2BGR)
+    return tile
+
+
+def _label(img: np.ndarray, text: str, y: int = 24) -> np.ndarray:
+    """Green text on a darkened box (a thick black outline drifts: Hershey glyphs widen with thickness)."""
+    (w, h), base = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+    x0, y0, x1, y1 = 4, max(0, y - h - 4), min(img.shape[1], 12 + w), min(img.shape[0], y + base + 2)
+    img[y0:y1, x0:x1] = (img[y0:y1, x0:x1] * 0.35).astype(np.uint8)
+    cv2.putText(img, text, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (80, 255, 80), 1, cv2.LINE_AA)
+    return img
+
+
+def compose(name: str, left: np.ndarray, right: np.ndarray, results: list[StitchResult], h: int) -> np.ndarray:
+    """Left half: left | right originals, h high. Right half: each stitch result, stacked."""
+    cell_w = round(left.shape[1] * h / left.shape[0])
+    originals = np.hstack([_label(_fit(left, cell_w, h), "left"), _label(_fit(right, cell_w, h), "right")])
+    res_w, res_h = h, h // len(results)
+    tiles = []
+    for r in results:
+        if r.ok:
+            tile = _label(_fit(r.image, res_w, res_h), f"{r.method}: ok {r.ms:.0f} ms")
+        else:
+            reason = r.detail.get("reason") or r.detail.get("status")
+            tile = _label(np.zeros((res_h, res_w, 3), np.uint8), f"{r.method}: FAILED ({reason})")
+        cv2.line(tile, (0, res_h - 1), (res_w, res_h - 1), (255, 255, 255), 1)
+        tiles.append(tile)
+    gap = np.full((h, 6, 3), 255, np.uint8)
+    view = np.hstack([originals, gap, np.vstack(tiles)])
+    return _label(view, name, y=h - 12)
+
+
+def show(dirs: list[pathlib.Path], height: int) -> None:
+    """One pair at a time. Next: Space / Enter / n / left click; previous: p / right click; q / Esc quits."""
+    cache: dict[int, np.ndarray] = {}
+    clicks: list[int] = []
+    cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
+    cv2.setMouseCallback(WINDOW, lambda event, *_: clicks.append(event)
+                         if event in (cv2.EVENT_LBUTTONDOWN, cv2.EVENT_RBUTTONDOWN) else None)
+    i = 0
+    while True:
+        if i not in cache:
+            d = dirs[i]
+            left, right, results = stitch_dir(d)
+            print(f"{d.name}: " + " | ".join(r.summary() for r in results))
+            cache[i] = compose(f"{d.name}  ({i + 1}/{len(dirs)})", left, right, results, height)
+        cv2.setWindowTitle(WINDOW, f"{WINDOW} - {dirs[i].name} ({i + 1}/{len(dirs)})"
+                                   + ("  |  Space / left click: next, p / right click: previous" if len(dirs) > 1 else ""))
+        cv2.imshow(WINDOW, cache[i])
+        key = cv2.waitKey(30) & 0xFF
+        if key in (ord("q"), 27) or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
+            break
+        click = clicks.pop(0) if clicks else None
+        if key in (ord(" "), 13, ord("n")) or click == cv2.EVENT_LBUTTONDOWN:
+            i = min(i + 1, len(dirs) - 1)
+        elif key == ord("p") or click == cv2.EVENT_RBUTTONDOWN:
+            i = max(i - 1, 0)
+    cv2.destroyAllWindows()
 
 
 def main(argv: list[str]) -> int:
-    if not argv:
-        print(__doc__)
-        return 1
-    # Each argument is a pair directory, or a directory of pair directories (captures/stereo).
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("paths", nargs="+", type=pathlib.Path,
+                    help="a pair directory (left.png / right.png), or a directory of them (captures/stereo)")
+    ap.add_argument("--no-show", action="store_true", help="only stitch and print, no window")
+    ap.add_argument("--height", type=int, default=640, help="window height (pixels)")
+    args = ap.parse_args(argv)
     dirs = []
-    for a in map(pathlib.Path, argv):
+    for a in args.paths:
         dirs += [a] if (a / "left.png").exists() else sorted(p.parent for p in a.glob("*/left.png"))
     if not dirs:
         print("no left.png / right.png found")
         return 1
+    if not args.no_show:
+        show(dirs, args.height)
+        return 0
     ok = {"opencv": 0, "orb": 0}
     for d in dirs:
-        results = stitch_dir(d)
+        _, _, results = stitch_dir(d)
         print(f"{d.name}: " + " | ".join(r.summary() for r in results))
         for r in results:
             ok[r.method] += r.ok
@@ -161,3 +241,4 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
+

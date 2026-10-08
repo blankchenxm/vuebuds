@@ -31,7 +31,7 @@
 - `fw/sdk/`:整份 SDK(已打好 `sdk_patch/nrfx_spis*` 补丁);`fw/_build/` 是作者在 macOS 上的编译产物,不要改;Windows 编译输出在 `fw/_build_win/`(已 gitignore)。
 - `fw/wiring_test.c`:HM0360 接线 / 状态检测工具(`CFLAGS=-DWIRING_TEST` 才编译,开机等 RTT 接上后逐项打印 PASS/FAIL),换模块、怀疑接线时先跑它。
 - `fw_nrf5340/`:nRF5340 DK 版(NCS v3.2.1 / Zephyr,sysbuild:应用核 + 网络核 `ipc_radio`)。直接编译 `../fw/sensors/`(不复制),`src/compat/` 提供驱动用到的 nRF5 SDK 头文件;`src/capture/` 是 DPPI 版硬件片选;`src/camera.c`、`src/monitor.c` 从 `fw/` 移植;`src/ble.c` 协议和 `fw/` 相同。说明见 `fw_nrf5340/README.md`。
-- `host/`:电脑端 `viewer.py`(BLE 实时预览,空格存图,`--rtt --reset` 合并固件日志);`stereo.py`(两块 5340 板空格同时拍一对、旋转后左右并排显示,S 存到 `captures/stereo/`);`stitch.py`(离线对存下的对做两种拼接:`python stitch.py captures/stereo`)。`host/protocol.py` 的 `BOARDS` 有四块板:`hm0360`、`hm01b0` 是 52840,`hm0360-5340`、`hm0360b-5340` 是 5340(两块都接 HM0360)。
+- `host/`:电脑端 `viewer.py`(BLE 实时预览,空格存图,`--rtt --reset` 合并固件日志);`stereo.py`(两块 5340 板空格同时拍一对、旋转后左右并排显示,S 存到 `captures/stereo/`);`stitch.py`(离线对存下的对做两种拼接并显示:`python stitch.py captures/stereo/<一对>`,左边原图、右边拼接结果;`--no-show` 批量统计)。`host/protocol.py` 的 `BOARDS` 有四块板:`hm0360`、`hm01b0` 是 52840,`hm0360-5340`、`hm0360b-5340` 是 5340(两块都接 HM0360)。
 - `hw/`:KiCad 硬件。**用户可能有未提交的 KiCad 改动和锁文件,不要提交、不要还原。**
 
 ## 环境与命令(Windows)

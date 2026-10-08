@@ -27,6 +27,7 @@ import numpy as np
 from bleak import BleakClient
 
 import protocol
+import stitch
 from viewer import SessionLog
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -189,11 +190,9 @@ def fit_height(img: np.ndarray, h: int) -> np.ndarray:
     return cv2.resize(img, (max(1, round(img.shape[1] * h / img.shape[0])), h), interpolation=interp)
 
 
-def label(img: np.ndarray, text: str, y: int = 22) -> np.ndarray:
+def label(img: np.ndarray, text: str, y: int = 24) -> np.ndarray:
     out = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) if img.ndim == 2 else img
-    cv2.putText(out, text, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
-    cv2.putText(out, text, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (80, 255, 80), 1, cv2.LINE_AA)
-    return out
+    return stitch._label(out, text, y)
 
 
 def compose(images: dict[str, np.ndarray], h: int) -> np.ndarray:
