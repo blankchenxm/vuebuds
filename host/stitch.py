@@ -5,8 +5,9 @@
                  BFMatcher (Hamming) -> findHomography (RANSAC) -> warpPerspective, no
                  cropping; when it fails the two pictures are used as they are
 
-Both take and return 8-bit grayscale images. Re-run on saved pairs:
-  python stitch.py captures/stereo/<pair dir>      # reads left.png / right.png, writes stitch_*.png
+Both take and return 8-bit grayscale images. Run on pairs saved by stereo.py:
+  python stitch.py captures/stereo                 # every pair: reads left.png / right.png, writes stitch_*.png
+  python stitch.py captures/stereo/<pair dir>      # one pair
 """
 import pathlib
 import sys
@@ -123,20 +124,38 @@ def stitch_all(left: np.ndarray, right: np.ndarray) -> list[StitchResult]:
     return [stitch_opencv(left, right), stitch_orb(left, right)]
 
 
-def main(argv: list[str]) -> int:
-    if len(argv) != 1:
-        print(__doc__)
-        return 1
-    d = pathlib.Path(argv[0])
+def stitch_dir(d: pathlib.Path) -> list[StitchResult]:
+    """Stitch d/left.png + d/right.png; writes stitch_<method>.png (removes a stale one on failure)."""
     left = cv2.imread(str(d / "left.png"), cv2.IMREAD_GRAYSCALE)
     right = cv2.imread(str(d / "right.png"), cv2.IMREAD_GRAYSCALE)
-    if left is None or right is None:
-        print(f"{d}: left.png / right.png not found")
-        return 1
-    for r in stitch_all(left, right):
-        print(r.summary())
+    results = stitch_all(left, right)
+    for r in results:
+        out = d / f"stitch_{r.method}.png"
         if r.ok:
-            cv2.imwrite(str(d / f"stitch_{r.method}.png"), r.image)
+            cv2.imwrite(str(out), r.image)
+        elif out.exists():
+            out.unlink()
+    return results
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        print(__doc__)
+        return 1
+    # Each argument is a pair directory, or a directory of pair directories (captures/stereo).
+    dirs = []
+    for a in map(pathlib.Path, argv):
+        dirs += [a] if (a / "left.png").exists() else sorted(p.parent for p in a.glob("*/left.png"))
+    if not dirs:
+        print("no left.png / right.png found")
+        return 1
+    ok = {"opencv": 0, "orb": 0}
+    for d in dirs:
+        results = stitch_dir(d)
+        print(f"{d.name}: " + " | ".join(r.summary() for r in results))
+        for r in results:
+            ok[r.method] += r.ok
+    print(f"{len(dirs)} pairs: " + ", ".join(f"{m} ok {n}" for m, n in ok.items()))
     return 0
 
 
