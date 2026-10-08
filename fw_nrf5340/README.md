@@ -15,6 +15,10 @@ streaming to `host/viewer.py`, or Monitor (frames cached in RAM, HM0360 S2 sleep
 - `src/camera.c`, `src/monitor.c`: ports of `fw/camera.c`, `fw/monitor.c`.
 - `src/ble.c`: Zephyr GATT service with the same UUIDs and packet format as `fw/ble_cus.c`.
   The network core runs Nordic's `ipc_radio` image (`sysbuild/ipc_radio/prj.conf`).
+- `src/snapshot.c` (not in `fw/`): control command **0xB2 takes one picture** in stream builds.
+  HM0360 sleeps (S2) between pictures; a request wakes it, the first frame is sent with the
+  usual frame packets, then it sleeps again. A bad frame is retaken (up to 2 times). One boot
+  takes either 0xB1 (stream) or 0xB2 (pictures). Used by `host/stereo.py` (two boards).
 
 ## Wiring
 
@@ -33,6 +37,8 @@ DK except FVLD → P1.09, LVLD → P1.10, CS loopback jumper P1.06 → P1.07.
 .\tools\dk5340.ps1 run -Cflags 'CAPTURE_STRESS_US=300'   # interrupt stress test
 .\tools\dk5340.ps1 build -Pristine                 # after adding a .conf / overlay file
 ..\host\.venv\Scripts\python.exe ..\host\viewer.py --board hm0360-5340 --rtt --reset
+# both boards (stream build flashed on each): Space takes a left + right pair, rotates, stitches
+..\host\.venv\Scripts\python.exe ..\host\stereo.py          # --auto 5: 5 pairs, no keyboard
 ```
 
 - Zephyr's devicetree step fails on the spaces in the repo path, so the script maps the repo
