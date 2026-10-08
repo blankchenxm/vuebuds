@@ -1,7 +1,8 @@
 """Two-board pictures: connect to the left and right nRF5340 boards at once, take a picture
 on both (control command 0xB2) at the same time, rotate each and show them side by side.
 
-  python stereo.py                          # Space: take a pair, S: save it, q / Esc: quit
+  python stereo.py                          # Space or left click: take a pair, S or right click: save, q / Esc: quit
+  python stereo.py --flash VGA              # first flash VGA (or QVGA / QQVGA) to both boards
   python stereo.py --auto 5 --interval 3    # take and save 5 pairs without the keyboard, then quit
   python stereo.py --rotate-left 180        # override a board's rotation (degrees clockwise)
 
@@ -15,6 +16,7 @@ import collections
 import datetime
 import json
 import pathlib
+import subprocess
 import sys
 import threading
 import time
@@ -31,6 +33,8 @@ HERE = pathlib.Path(__file__).resolve().parent
 WINDOW = "vuebuds stereo"
 PAIR_TIMEOUT_S = 20.0  # VGA from two boards over Windows: ~8 s expected
 SIDES = ("left", "right")
+TAKE_HINT = "Space / left click: new pair"
+SAVE_HINT = "S / right click: save"
 ROTATIONS = {0: None, 90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
 
 
@@ -219,12 +223,35 @@ def save_pair(pair: Pair, images: dict[str, np.ndarray], rotations: dict[str, in
     return out
 
 
+def flash_boards(mode: str, boards: dict[str, str], log: SessionLog) -> bool:
+    """Build fw_nrf5340 (stream app) in the given mode and flash it to both boards via dk5340.ps1."""
+    script = HERE.parent / "fw_nrf5340" / "tools" / "dk5340.ps1"
+    for side in SIDES:
+        dk_board = protocol.BOARDS[boards[side]].get("dk_board")
+        if dk_board is None:
+            log("host", f"--flash: {boards[side]} is not an nRF5340 board")
+            return False
+        log("host", f"flashing {mode} to the {side} board ({dk_board}); the first build of a mode takes 1-2 min...")
+        t0 = time.monotonic()
+        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
+                            "flash", "-Mode", mode, "-Board", dk_board],
+                           cwd=script.parent.parent, capture_output=True, text=True, errors="replace")
+        if r.returncode != 0:
+            tail = "\n".join((r.stdout + r.stderr).strip().splitlines()[-15:])
+            log("host", f"flashing the {side} board failed (exit {r.returncode}):\n{tail}")
+            return False
+        log("host", f"{side} board flashed with {mode} in {time.monotonic() - t0:.0f} s")
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--left", default="hm0360-5340", choices=sorted(protocol.BOARDS))
     ap.add_argument("--right", default="hm0360b-5340", choices=sorted(protocol.BOARDS))
     ap.add_argument("--rotate-left", type=int, choices=sorted(ROTATIONS), help="degrees clockwise (default: BOARDS)")
     ap.add_argument("--rotate-right", type=int, choices=sorted(ROTATIONS), help="degrees clockwise (default: BOARDS)")
+    ap.add_argument("--flash", choices=["QQVGA", "QVGA", "VGA"],
+                    help="first build and flash this mode to both boards (the mode is compile-time)")
     ap.add_argument("--height", type=int, default=640, help="display height of each picture (pixels)")
     ap.add_argument("--auto", type=int, default=0, help="take and save N pairs automatically, then quit")
     ap.add_argument("--interval", type=float, default=2.0, help="with --auto: seconds between pairs")
@@ -239,6 +266,9 @@ def main():
     log = SessionLog(HERE / "logs" / f"stereo-{datetime.datetime.now():%Y%m%d-%H%M%S}.log")
     log("host", f"session log: {log.path}; left {args.left} (rotate {rotations['left']}), "
                 f"right {args.right} (rotate {rotations['right']})")
+    if args.flash and not flash_boards(args.flash, boards, log):
+        log.close()
+        return 1
     st = Stereo(log, boards)
     h = args.height
     canvas = np.zeros((h, h * 3 // 2, 3), np.uint8)
@@ -248,13 +278,17 @@ def main():
     saved = 0
     next_auto = 0.0
     cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
+    # Mouse clicks work even when an input method (IME) swallows key presses.
+    clicks: collections.deque[str] = collections.deque()
+    cv2.setMouseCallback(WINDOW, lambda event, *_: clicks.append(
+        "take" if event == cv2.EVENT_LBUTTONDOWN else "save") if event in (cv2.EVENT_LBUTTONDOWN, cv2.EVENT_RBUTTONDOWN) else None)
 
     def save_shown():
         nonlocal shown_saved, saved, message
         pair, images = shown
         shown_saved = save_pair(pair, images, rotations, boards)
         saved += 1
-        message = f"pair {pair.index} saved -> {shown_saved.name}  |  Space: new pair"
+        message = f"pair {pair.index} saved -> {shown_saved.name}  |  {TAKE_HINT}"
         log("host", f"pair {pair.index}: saved -> {shown_saved}")
 
     try:
@@ -266,9 +300,9 @@ def main():
                 shown, shown_saved = (pair, images), None
                 canvas = compose(images, h)
                 if pair.warmup:
-                    message = "warm-up pair (camera init, not saved)  |  Space: take a pair"
+                    message = f"warm-up pair (camera init, not saved)  |  {TAKE_HINT}"
                 else:
-                    message = f"pair {pair.index}  |  S: save  Space: new pair"
+                    message = f"pair {pair.index}  |  {SAVE_HINT}  {TAKE_HINT}"
                     if args.auto:
                         save_shown()
                 next_auto = time.monotonic() + args.interval
@@ -286,16 +320,25 @@ def main():
             cv2.setWindowTitle(WINDOW, f"{WINDOW} - {st.status()} | pairs saved {saved}")
             cv2.imshow(WINDOW, view)
             key = cv2.waitKey(30) & 0xFF
+            if key != 0xFF:
+                log("host", f"key {key} ({chr(key) if 32 <= key < 127 else '-'})")
             if key in (ord("q"), 27) or cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:
                 break
-            if key == ord(" "):
+            action = clicks.popleft() if clicks else None
+            if key in (ord(" "), 13):
+                action = "take"
+            elif key in (ord("s"), ord("S")):
+                action = "save"
+            if action == "take":
                 if st.trigger():
                     message = "taking..."
                 else:
-                    log("host", "not ready (both boards connected, previous pair done?)")
-            elif key in (ord("s"), ord("S")):
+                    why = "previous pair not done yet" if st.pending else f"boards not ready ({st.status()})"
+                    message = f"cannot take: {why}"
+                    log("host", f"take ignored: {why}")
+            elif action == "save":
                 if shown is None or shown[0].warmup:
-                    message = "nothing to save yet  |  Space: take a pair"
+                    message = f"nothing to save yet  |  {TAKE_HINT}"
                 elif shown_saved is not None:
                     message = f"pair {shown[0].index} already saved -> {shown_saved.name}"
                 else:

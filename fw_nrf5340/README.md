@@ -38,7 +38,7 @@ DK except FVLD → P1.09, LVLD → P1.10, CS loopback jumper P1.06 → P1.07.
 .\tools\dk5340.ps1 build -Pristine                 # after adding a .conf / overlay file
 ..\host\.venv\Scripts\python.exe ..\host\viewer.py --board hm0360-5340 --rtt --reset
 # both boards (stream build flashed on each): Space takes a left + right pair, S saves it
-..\host\.venv\Scripts\python.exe ..\host\stereo.py          # --auto 5: 5 pairs, no keyboard
+..\host\.venv\Scripts\python.exe ..\host\stereo.py          # --flash VGA: flash VGA to both first; --auto 5: no keyboard
 ..\host\.venv\Scripts\python.exe ..\host\stitch.py ..\host\captures\stereo   # stitch saved pairs offline
 ```
 
