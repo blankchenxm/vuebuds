@@ -13,7 +13,7 @@
   - `fw_nrf5340/src/main.c`、`ble.c`、`event.h`:新事件 `EVENT_CAMERA_SNAPSHOT`;一次开机只能用 0xB1(推流)或 0xB2(拍照)其中一种,另一种被忽略并打日志;Monitor 编译里 0xB2 被忽略。
   - `host/stereo.py`(新):Windows 同时连两块板(按地址,先连左再连右),**空格**同时给两块板写 0xB2,收齐左右两张 → 按 `BOARDS` 的 `rotate` 旋转 → 窗口左右并排显示(不拼接,用户 10-08 要求);**S** 把屏幕上这一对存到 `host/captures/stereo/<时间>/`:`left.png`、`right.png`(已旋转、原分辨率)、`info.json`(写命令完成时间、每张收完时间、丢包)。再按空格拍下一对。板子刚连上时自动拍一对"热身"(含相机初始化,不能存)。`--auto N` 不用键盘拍并存 N 对;一对 20 s 收不齐就放弃。
   - `host/stitch.py`(新,离线用):`stitch_opencv`(`cv2.Stitcher` PANORAMA,作参照)和 `stitch_orb`(论文 §3.2.3 的轻量流程:ORB → BFMatcher 汉明距离 + 比值测试 → `findHomography` RANSAC → `warpPerspective`,不裁边,失败就保留两张)。ORB 的合理性检查:内点 ≥ 15、变形后的右图是凸四边形、每条边长度 0.5–2 倍。`python stitch.py captures/stereo` 对存下的每一对拼接,写 `stitch_opencv.png` / `stitch_orb.png`(成功才有),最后统计两种方法各成功几对。
-  - `host/protocol.py`:`CMD_SNAPSHOT = 0xB2`;两块 5340 板 `rotate: 90`。
+  - `host/protocol.py`:`CMD_SNAPSHOT = 0xB2`;左板 `hm0360-5340` `rotate: 90`,右板 `hm0360b-5340` `rotate: 270`(10-08 用户确认,90° 时上下颠倒)。
 - **为什么**:双耳流程先跑通(用户 10-07 要求),不追求性能;同时拍靠"主机同时下命令"(方案 A,和论文一样)。
 - **和原代码的行为差异**:新增 0xB2 命令(新协议命令,`fw/` 没有);0xB1 推流、Monitor 行为不变。坏帧重拍只在 0xB2 里(推流仍是丢掉不发)。
 - **验证**(两块 5340 + HM0360,Windows 直连):
