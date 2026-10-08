@@ -21,6 +21,7 @@
   - **Monitor 两颗传感器都做**(HM01B0 版 2026-10-02 用户提出):HM0360 用 S2;HM01B0 没有 S2,**MCLK 常开、传感器一直出帧**,就是推流流程去掉 BLE(PR #22)。不开运动检测;不做触发/回传;52840 不做 VGA(5340 的 HM0360 从 10-07 起支持 VGA)。S2 唤醒流程(XSLEEP 低 → 关 MCLK → 开 MCLK → XSLEEP 高)已实测:立刻能读 I2C,寄存器保留,不用重写。
   - **Monitor 实现**(PR #16,2026-10-01 用户确认):编译时 `CAM_APP=MONITOR`(默认 `STREAM`)、开机自动开始、RTC2 周期 `MONITOR_PERIOD_MS = 500`、每次唤醒**不跳帧**,存唤醒后的第 1 帧(`MONITOR_SKIP_FRAMES = 0`;2026-10-02 用户决定,PR #28,原来是跳 1 帧:实测第 1 帧和第 2、3 帧亮度相同、帧间差异 1–2/255 = 正常噪声,只在静止室内场景测过,睡眠中光线突变未测);传感器开始时进流模式,之后只靠 XSLEEP + MCLK 睡眠 / 唤醒;BLE 照常广播、不推流;代码在 `fw/monitor.c`。(52840 不做 VGA;5340 从 10-07 起支持 HM0360 VGA,见"nRF5340"一节。)开机按型号自动选 HM0360 / HM01B0 流程;HM01B0 不跳帧;`MONITOR_PERIOD_MS=0` 每帧都存(`dk.ps1 -PeriodMs 0`);坏帧(字节数不对)不存、不发(PR #20)。
   - RAM 保持现状(RTT 保留,日志缓冲 16 KB、堆 8 KB 不缩小)。
+  - **双板最小流程**(用户 10-07 要求,PR #?):5340 控制命令 **0xB2 = 拍一张**(只在 `fw_nrf5340/`;HM0360 平时 S2 睡眠,请求时唤醒采第 1 帧发出再睡;坏帧最多重拍 2 次;一次开机只用 0xB1 或 0xB2 其中一种)。`host/stereo.py`:Windows 同时连两块板、空格同时拍,同时拍靠主机同时下命令(方案 A),不追求性能。两块 5340 板图像**顺时针转 90°**(`BOARDS` 的 `rotate`,10-07 实拍确认);左 = `hm0360-5340`、右 = `hm0360b-5340`(还没按佩戴位置确认)。拼接两种都保留(`cv2.Stitcher` + 论文的 ORB 流程,`host/stitch.py`),后续比较。后续优化(桥、同步 C/C' + FSIN、曝光、PSRAM、片上 JPEG、Mac 测试)见笔记 `10.5~10.11/硬件流程+后续优化.md`。
 
 ## 仓库结构
 
@@ -30,7 +31,7 @@
 - `fw/sdk/`:整份 SDK(已打好 `sdk_patch/nrfx_spis*` 补丁);`fw/_build/` 是作者在 macOS 上的编译产物,不要改;Windows 编译输出在 `fw/_build_win/`(已 gitignore)。
 - `fw/wiring_test.c`:HM0360 接线 / 状态检测工具(`CFLAGS=-DWIRING_TEST` 才编译,开机等 RTT 接上后逐项打印 PASS/FAIL),换模块、怀疑接线时先跑它。
 - `fw_nrf5340/`:nRF5340 DK 版(NCS v3.2.1 / Zephyr,sysbuild:应用核 + 网络核 `ipc_radio`)。直接编译 `../fw/sensors/`(不复制),`src/compat/` 提供驱动用到的 nRF5 SDK 头文件;`src/capture/` 是 DPPI 版硬件片选;`src/camera.c`、`src/monitor.c` 从 `fw/` 移植;`src/ble.c` 协议和 `fw/` 相同。说明见 `fw_nrf5340/README.md`。
-- `host/`:电脑端 `viewer.py`(BLE 实时预览,空格存图,`--rtt --reset` 合并固件日志)。`host/protocol.py` 的 `BOARDS` 有四块板:`hm0360`、`hm01b0` 是 52840,`hm0360-5340`、`hm0360b-5340` 是 5340(两块都接 HM0360)。
+- `host/`:电脑端 `viewer.py`(BLE 实时预览,空格存图,`--rtt --reset` 合并固件日志);`stereo.py`(两块 5340 板同时拍一对、旋转、拼接,存到 `captures/stereo/`);`stitch.py`(两种拼接,也能对存下的一对重跑)。`host/protocol.py` 的 `BOARDS` 有四块板:`hm0360`、`hm01b0` 是 52840,`hm0360-5340`、`hm0360b-5340` 是 5340(两块都接 HM0360)。
 - `hw/`:KiCad 硬件。**用户可能有未提交的 KiCad 改动和锁文件,不要提交、不要还原。**
 
 ## 环境与命令(Windows)
@@ -80,6 +81,8 @@
   - **不要在 BT 回调(BT RX 线程)里直接 `bt_gatt_notify`**:发送队列满时会死锁,放到工作队列。
   - 新板出厂开着 APPROTECT,第一次要 `nrfjprog --recover`(两块都已做)。
   - PowerShell 里别把 `dk5340.ps1 flash` 的输出接到 `Select-Object -First N`:管道提前结束会杀掉 west,结果只烧了网络核、没烧应用核。
+  - **HM0360B 板 VGA 偶发 `OVERFLOW, BAD`,每段字节数都对**(10-08,拍照命令下 25 张里 5 张;HM0360 板和 QVGA 没见过),根因未查。0xB2 会自动重拍;推流时这一帧被丢掉。
+  - 双板拍照时抓 RTT:不要用 `dk5340.ps1 rtt`(会复位板子),直接起 `JLinkRTTLogger -USB <SN>` 附着,`stereo.py` 照常连。
 
 ## 已知坑
 
