@@ -25,7 +25,9 @@ param(
 # west / nrfjprog print progress on stderr: rely on exit codes instead of 'Stop'.
 $ErrorActionPreference = 'Continue'
 $Repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-$Drive = 'V:'
+# Paths with spaces are built through drive V: (subst); a path without spaces (e.g. a git
+# worktree) is built in place, so it never picks up the code V: points at.
+$Drive = if ($Repo -match ' ') { 'V:' } else { $Repo.TrimEnd('\') }
 $Ncs = if ($env:NCS_DIR) { $env:NCS_DIR } else { 'D:\NRFSDK' }
 $Tc = Join-Path $Ncs 'toolchains\66cdf9b75e'
 $JLinkDir = if ($env:JLINK_DIR) { $env:JLINK_DIR } else { 'C:\Program Files\SEGGER\JLink' }
@@ -48,7 +50,7 @@ $BuildDir = "$Drive\fw_nrf5340\build_$Variant"
 $RttLog = Join-Path $Repo "fw_nrf5340\build_logs\rtt_$($Board.ToLower()).log"
 
 function Use-Drive {
-  if (-not (Test-Path "$Drive\fw_nrf5340")) { cmd /c "subst $Drive `"$Repo`"" | Out-Null }
+  if ($Drive -eq 'V:' -and -not (Test-Path "$Drive\fw_nrf5340")) { cmd /c "subst $Drive `"$Repo`"" | Out-Null }
 }
 
 function Use-Ncs {

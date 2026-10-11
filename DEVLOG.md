@@ -5,6 +5,32 @@
 
 ---
 
+## 2026-10-11 · BLE-USB 桥 fw_bridge(52840 DK 当中心设备)+ 新硬件自检(PR #?,Issue #39)
+
+- **阶段**:硬件优化计划阶段 1(Obsidian `02-daily_raw/10.5~10.11/项目硬件优化进程.md`)
+- **改了什么**:
+  - `fw_bridge/`(新,NCS v3.2.1):52840 DK(SN `1050221517`,原 HM01B0 板,`fw/` 和 SoftDevice 已擦)当 BLE 中心设备,同时连两块 5340 相机板,通知经 USB CDC ACM(DK 侧面 nRF USB 口)转给电脑。`src/central.c`:按电脑给的地址一块一块连、掉线自动重连;连接间隔由电脑定(默认 15 ms),**拒绝相机板自己的参数请求**;2M PHY、数据长度 251、MTU 由相机板决定(桥支持到 498);连上后的 PHY / 数据长度 / MTU / 发现服务放在系统工作队列(在 BT RX 线程里调用会死锁,实测 `Controller unresponsive, opcode 0x2032`)。`src/usb.c`:中断 + 环形缓冲收发;`src/main.c`:命令 `I` / `C` 配置 / `W` 写控制特征(槽位掩码,两块板的命令紧接着发)/ `X` 断开。`src/usb_test.c`:USB 测速(`-Dfw_bridge_USB_TEST=1`)。`tools/bridge.ps1`:build / flash / rtt。说明在 `fw_bridge/README.md`。
+  - `host/bridge.py`(新):串口收发、按槽位分流、`Bridge.configure / write / disconnect / wait_ready(after=…)`(相机板复位后旧连接要 4 s 监督超时才断,只认复位后的就绪事件);`release()` 让桥放开所有板子(Windows 直连工具要用);命令行 `python bridge.py --stream --duration 20` 两块板同时推流并打印速率。
+  - `host/ble_bench.py`:`--bridge [PORT]`,`--board` 可给两块板(同时推流,每块一行结果 / 一行 CSV,CSV 加了 `link`、`kb_per_s` 列);直连模式先 `bridge.release()`。
+  - `host/stereo.py`:`--bridge [PORT]`、`--interval-ms`:两块板经桥连接,拍照时一条桥命令同时写两块板的 0xB2。
+  - `host/usb_test.py`(新):桥 USB 双向测速 + 数据校验。
+  - `fw_nrf5340/src/hw_test.c`(新,`-Cflags HW_TEST`):10-10 新接的线的自检:HM0360 I2C、**FSIN**(P1.11,开 FSYNC 后脉冲才出帧)、**TRIGGER**(P0.25,Streaming 4)、**PSRAM**(SPIM4 8 MHz,CS P1.12 / SDI P1.13 / SDO P1.14 / SCK P1.15:线间短路、读 ID、图案、软件 SPI 对照、1–8 MHz、整片 8 MB × 2 轮)。`main.c` 里 `#ifdef HW_TEST` 时只跑自检。
+  - `fw_nrf5340/tools/dk5340.ps1`:仓库路径没有空格(git worktree)时原地编译,不再 `subst V:`(否则会编到 V: 指向的另一份代码)。
+- **为什么**:Windows 每次连接自己定参数、两块板同时连时速度不一致;桥固定参数,也是时间同步方案 E(`conn_time_sync`,需要桥当中心设备)的前提。
+- **和原代码的行为差异**:相机板固件**没有改**(协议、MTU 247 照旧)。新增的只是桥、电脑端工具和 `HW_TEST` 编译选项。
+- **验证**(QVGA,每轮 30 s,同一时段 Windows 直连 / 桥交替 2 轮,全部 0 丢包):
+  | | Windows 直连 | 桥(15 ms) |
+  |---|---|---|
+  | 单板,相机 MTU 247 | 1.00 / 1.05 fps(75–79 KB/s) | 1.40 / 1.37 fps(103–105 KB/s) |
+  | 单板,相机 MTU 498(实验) | 1.07 / 1.08 fps(81 KB/s) | **1.56 / 1.56 fps(117 KB/s)**,每帧 0.52–0.61 s |
+  | 双板推流 | 合计 65 KB/s,左板慢一倍多(10-08) | 每块约 55 KB/s,两块一样 |
+  | 双板 VGA 拍一对(`stereo.py`,5 对) | 9.2 s,左右差 3.7 s(10-08) | **5.6–5.9 s,左右差约 0.1 s** |
+  - 间隔:单板 7.5 / 15 / 30 ms 差别不大;双板 30 ms、10 ms 时两条连接不均衡(一块 0.4 fps、一块 1.2 fps),7.5 / 15 ms 均衡 → 默认 15 ms。
+  - 双板合计稳定在约 110–116 KB/s:桥不往 USB 转发(只计数)时一样,连接事件长度改成不限一样,相机板网络核发送缓冲 3 → 10 也没变化 → 瓶颈在桥的 BLE 协议栈每包处理(CPU 约 55% + 控制器中断)。MTU 498 让通知数减半,单板 +13%。
+  - USB:双向 4 MB × 3 轮 0 错误,桥 → 电脑 212 KB/s(Zephyr CDC ACM 一次发一个 64 B 包,换独立工作队列不变),够两块板用。
+  - 硬件自检:两块板 I2C / FSIN / TRIGGER 都通过。FSIN:不打脉冲 0 帧,每 500 ms 一个脉冲 4/4 出帧,每 250 ms 一个时 8 个只出 6 帧,脉冲 → FVLD 约 12 ms。PSRAM:HM0360B 板 ID `0D 5D`,整片 8 MB 写读 2 轮 0 错误(写 910 KB/s、读 783 KB/s,片选连续拉低约 1 ms 写 1 KB,未遵守 tCEM);HM0360 板 ID 读成 `0B 6D`,只有全 0 / 全 1 能读对,规律是"SDO 每次 0→1,芯片多收一个时钟",没有短路,等用户照 HM0360B 的改法修。
+- **遗留 / 下一步**:相机板是否改 MTU 498(待用户决定);HM0360 板 PSRAM 接线;FSIN 每 250 ms 一个脉冲时丢脉冲的原因;桥 RTT 里 Windows 枚举时的 `udc: Failed to allocate net_buf 4095`(端口正常)。下一阶段:帧头 v2。
+
 ## 2026-10-08 · 双板最小流程:"拍一张"命令 0xB2 + 左右同时拍、旋转、拼接(PR #36,Issue #35)
 
 - **阶段**:新功能(双耳最小流程,见 Obsidian `02-daily_raw/10.5~10.11/硬件流程+后续优化.md`)

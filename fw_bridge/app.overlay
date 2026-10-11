@@ -1,0 +1,7 @@
+/* USB CDC ACM serial port to the PC (nRF USB connector). */
+&zephyr_udc0 {
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+		label = "VueBuds bridge";
+	};
+};
