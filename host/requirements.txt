@@ -1,3 +1,6 @@
 bleak>=0.22
 opencv-python>=4.9
 numpy>=1.26
+# Optional, for stitch.py --methods lightglue / loftr (CUDA build: install torch / torchvision
+# from https://download.pytorch.org/whl/cu128 first; PyPI only has the CPU build):
+#   torch torchvision kornia lightglue@git+https://github.com/cvg/LightGlue.git

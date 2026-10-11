@@ -2,3 +2,4 @@
 logs/
 captures/
 __pycache__/
+.env

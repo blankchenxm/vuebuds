@@ -5,6 +5,33 @@
 
 ---
 
+## 2026-10-10 · 10-09 双目照片:多种拼接方法 + VLM 能看清多少(PR #?,Issue #37)
+
+- **阶段**:工具 / 评估(计划见 Obsidian `10.5~10.11/HM0360图片sititch尝试.md`、`HM0360图片VLM理解.md`)
+- **改了什么**:
+  - `host/stitch.py`:改成多方法:基线 `opencv`(PANORAMA)、`opencv_scans`、`orb`(论文);更强的匹配 `sift`、`asift`(OpenCV 5 没有 AKAZE,换成 ASIFT,抗视角变化)、`lightglue`(SuperPoint + LightGlue)、`loftr`(kornia,稠密匹配);抗视差 `apap`(Moving DLT,每 10 px 一个局部单应)、`multi_h`(顺序 RANSAC 找多个平面,每格选最近的那个;Warping Residual 的简化版)。匹配类方法沿用论文的"一个单应 + 左图直接盖上去";apap / multi_h 用羽化融合(错位会显示成重影)。每对目录写 `stitch_<方法>.png`、`matches_<方法>.png`(绿 = 内点、红 = 外点)、`compare.png`、`stitch_results.json`;集合目录写 `stitch_summary.csv` 和人工评分表 `stitch_score.csv`(只追加新行,不覆盖已填的分)。`--methods` 只重跑部分方法时和已有结果合并。lightglue / loftr 需要 torch(可选依赖,没装就跳过)。
+  - `host/vlm_eval.py`(新):左右两张原图放在同一次请求(Image 1 = 左、Image 2 = 右),英文提示词,temperature 0;任务 A(尽量详细描述、逐字转写文字、看不清写 [unreadable])、任务 B(手握 / 手指的是哪个物品 + 特征,只跑 `<集合>/eval_config.json` 里列出的对)。后端:OpenRouter(key 从环境变量或 `host/.env`,已 gitignore)、本地 Ollama。结果写 `<对>/vlm/<模型>_<任务>.json`、`<集合>/vlm_summary.csv`;429 限流时退避重试(30 s 起,最多 6 次)。
+  - `host/vlm_score.py`(新):和 `<集合>/truth.json` 对比打分:按字号分组的文字召回、"编造词"(模型说读到、但任何真值文字里都没有的词)、物品召回、任务 B 目标对不对。
+  - `host/.gitignore` 加 `.env`;`host/requirements.txt` 写明可选的 torch / kornia / lightglue(CUDA 版要从 PyTorch 的 cu128 源装,PyPI 只有 CPU 版)。
+- **为什么**:用户 10-09 要求:试各种(优先不用 GPU 的)方法把左右图拼成一张正常的图;测 QVGA / VGA 下 VLM 能看清多小的字、能否判断手指的物品。
+- **和原代码的行为差异**:只有电脑端工具;`stitch.py` 的 `orb` / `opencv` 结果不变,默认方法从 2 种变成 9 种。
+- **验证**(数据:`20261009_QVGA` 15 对、`20261009_VGA` 12 对,照片不进 git):
+  - 拼接成功率(自动判定,不代表好看):
+    | 方法 | opencv | scans | orb | sift | asift | lightglue | loftr | apap | multi_h |
+    |---|---|---|---|---|---|---|---|---|---|
+    | QVGA | 5/15 | 4/15 | 4/15 | 11/15 | 15/15 | 15/15 | 15/15 | 11/15 | 11/15 |
+    | VGA | 8/12 | 7/12 | 9/12 | 11/12 | 11/12 | 12/12 | 11/12 | 11/12 | 11/12 |
+  - 看图:物品摆在同一张桌上时多数方法都能拼成一张完整的图;手离得近,apap / multi_h 里有重影。好坏等用户在 `stitch_score.csv` 打分。
+  - VLM(只跑了 OpenRouter 上有的 Qwen3-VL-8B、Qwen3.5-9B;真值是 Claude 起草的草稿,待用户核对):
+    | | 大字召回 | 中字 | 小字 | 编造词 / 次 | 任务 B 目标正确 |
+    |---|---|---|---|---|---|
+    | Qwen3-VL-8B QVGA | 0.92 | 0.23 | 0.19 | 2.9 | 6/9 |
+    | Qwen3-VL-8B VGA | 1.00 | 0.88 | 0.68 | 1.8 | 5/5 |
+    | Qwen3.5-9B QVGA | 0.96 | 0.25 | 0.19 | 2.9 | 6/9 |
+    | Qwen3.5-9B VGA | 1.00 | 0.78 | 0.73 | 0.8 | 5/5 |
+    QVGA 下中小字基本读不出,而且会编(把 KRYLON 读成 RAYLYN / HAYLON,把喷漆说成 "Aussie 护发喷雾");VGA 下中字读出约 80–90%、小字约 70%。
+- **遗留 / 下一步**:Qwen2.5-VL-7B、MiniCPM-V 4.5、Gemma 4 E4B 在 OpenRouter 上没有,要本地 Ollama(C 盘只剩约 11 GB,模型要放 D 盘);Moondream 3 没有 Ollama 版。用户核对 `truth.json`、给拼接打分。Warping Residual 官方代码没找到,`multi_h` 是简化版。
+
 ## 2026-10-08 · 双板最小流程:"拍一张"命令 0xB2 + 左右同时拍、旋转、拼接(PR #36,Issue #35)
 
 - **阶段**:新功能(双耳最小流程,见 Obsidian `02-daily_raw/10.5~10.11/硬件流程+后续优化.md`)
