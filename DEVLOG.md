@@ -14,7 +14,7 @@
   - `host/ble_bench.py`:`--bridge [PORT]`,`--board` 可给两块板(同时推流,每块一行结果 / 一行 CSV,CSV 加了 `link`、`kb_per_s` 列);直连模式先 `bridge.release()`。
   - `host/stereo.py`:`--bridge [PORT]`、`--interval-ms`:两块板经桥连接,拍照时一条桥命令同时写两块板的 0xB2。
   - `host/usb_test.py`(新):桥 USB 双向测速 + 数据校验。
-  - `fw_nrf5340/src/hw_test.c`(新,`-Cflags HW_TEST`):10-10 新接的线的自检:HM0360 I2C、**FSIN**(P1.11,开 FSYNC 后脉冲才出帧)、**TRIGGER**(P0.25,Streaming 4)、**PSRAM**(SPIM4 8 MHz,CS P1.12 / SDI P1.13 / SDO P1.14 / SCK P1.15:线间短路、读 ID、图案、软件 SPI 对照、1–8 MHz、整片 8 MB × 2 轮)。`main.c` 里 `#ifdef HW_TEST` 时只跑自检。
+  - `fw_nrf5340/src/hw_test.c`(新,`-Cflags HW_TEST`):10-10 新接的线的自检:HM0360 I2C、**FSIN**(P1.11,开 FSYNC 后脉冲才出帧)、**TRIGGER**(P0.25,Streaming 4)、**PSRAM**(SPIM4 8 MHz,引脚强驱动,CS P1.12 / SDI P1.13 / SDO P1.14 / SCK P1.15:线间短路、读 ID、图案、软件 SPI 对照、1–8 MHz、整片 8 MB × 2 轮)。`main.c` 里 `#ifdef HW_TEST` 时只跑自检。
   - `fw_nrf5340/tools/dk5340.ps1`:仓库路径没有空格(git worktree)时原地编译,不再 `subst V:`(否则会编到 V: 指向的另一份代码)。
 - **为什么**:Windows 每次连接自己定参数、两块板同时连时速度不一致;桥固定参数,也是时间同步方案 E(`conn_time_sync`,需要桥当中心设备)的前提。
 - **和原代码的行为差异**:相机板固件**没有改**(协议、MTU 247 照旧)。新增的只是桥、电脑端工具和 `HW_TEST` 编译选项。
@@ -28,8 +28,8 @@
   - 间隔:单板 7.5 / 15 / 30 ms 差别不大;双板 30 ms、10 ms 时两条连接不均衡(一块 0.4 fps、一块 1.2 fps),7.5 / 15 ms 均衡 → 默认 15 ms。
   - 双板合计稳定在约 110–116 KB/s:桥不往 USB 转发(只计数)时一样,连接事件长度改成不限一样,相机板网络核发送缓冲 3 → 10 也没变化 → 瓶颈在桥的 BLE 协议栈每包处理(CPU 约 55% + 控制器中断)。MTU 498 让通知数减半,单板 +13%。
   - USB:双向 4 MB × 3 轮 0 错误,桥 → 电脑 212 KB/s(Zephyr CDC ACM 一次发一个 64 B 包,换独立工作队列不变),够两块板用。
-  - 硬件自检:两块板 I2C / FSIN / TRIGGER 都通过。FSIN:不打脉冲 0 帧,每 500 ms 一个脉冲 4/4 出帧,每 250 ms 一个时 8 个只出 6 帧,脉冲 → FVLD 约 12 ms。PSRAM:HM0360B 板 ID `0D 5D`,整片 8 MB 写读 2 轮 0 错误(写 910 KB/s、读 783 KB/s,片选连续拉低约 1 ms 写 1 KB,未遵守 tCEM);HM0360 板 ID 读成 `0B 6D`,只有全 0 / 全 1 能读对,规律是"SDO 每次 0→1,芯片多收一个时钟",没有短路,等用户照 HM0360B 的改法修。
-- **遗留 / 下一步**:相机板是否改 MTU 498(待用户决定);HM0360 板 PSRAM 接线;FSIN 每 250 ms 一个脉冲时丢脉冲的原因;桥 RTT 里 Windows 枚举时的 `udc: Failed to allocate net_buf 4095`(端口正常)。下一阶段:帧头 v2。
+  - 硬件自检:两块板 I2C / FSIN / TRIGGER 都通过。FSIN:不打脉冲 0 帧,每 500 ms 一个脉冲 4/4 出帧,每 250 ms 一个时 8 个只出 6 帧,脉冲 → FVLD 约 12 ms。PSRAM:两块板都通过(ID `0D 5D`,整片 8 MB 写读 2 轮 0 错误,写 910–917 KB/s、读 782–789 KB/s,片选连续拉低约 1 ms 写 1 KB,未遵守 tCEM)。HM0360 板一开始 ID 读成 `0B 6D`、只有全 0 / 全 1 读得对(规律:SDO 每次 0→1,芯片多收一个时钟;没有短路,GPIO 软件 SPI 也一样);**SCK / SDI / CS 改成强驱动(H0H1)后正常**,自检默认强驱动(`PSRAM_STANDARD_DRIVE` 可对比)。
+- **遗留 / 下一步**:相机板是否改 MTU 498(待用户决定);FSIN 每 250 ms 一个脉冲时丢脉冲的原因;桥 RTT 里 Windows 枚举时的 `udc: Failed to allocate net_buf 4095`(端口正常)。下一阶段:帧头 v2。
 
 ## 2026-10-08 · 双板最小流程:"拍一张"命令 0xB2 + 左右同时拍、旋转、拼接(PR #36,Issue #35)
 

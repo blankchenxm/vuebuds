@@ -190,6 +190,21 @@ static void testTrigger(void)
 
 #define PSRAM_SIZE  (8u * 1024 * 1024)
 #define PSRAM_PAGE  1024u
+// SCK / SDI / CS with high drive (H0H1). With standard drive the HM0360 board (jumper wires)
+// got an extra clock edge on SCK at each SDO rise (ID 0b 6d, data shifted); 2026-10-11.
+// -Cflags 'HW_TEST;PSRAM_STANDARD_DRIVE' for the comparison.
+#ifdef PSRAM_STANDARD_DRIVE
+#define PSRAM_DRIVE NRF_GPIO_PIN_S0S1
+#else
+#define PSRAM_DRIVE NRF_GPIO_PIN_H0H1
+#endif
+
+static void psramOutput(uint32_t pin, bool inputConnected)
+{
+  nrf_gpio_cfg(pin, NRF_GPIO_PIN_DIR_OUTPUT,
+               inputConnected ? NRF_GPIO_PIN_INPUT_CONNECT : NRF_GPIO_PIN_INPUT_DISCONNECT,
+               NRF_GPIO_PIN_NOPULL, PSRAM_DRIVE, NRF_GPIO_PIN_NOSENSE);
+}
 
 static uint8_t spiTx[4 + PSRAM_PAGE];
 static uint8_t spiRx[4 + PSRAM_PAGE];
@@ -211,11 +226,10 @@ static void psramInit(void)
 {
   NRF_SPIM_Type *s = NRF_SPIM4;
   nrf_gpio_pin_set(PSRAM_CS);
-  nrf_gpio_cfg_output(PSRAM_CS);
+  psramOutput(PSRAM_CS, false);
   nrf_gpio_pin_clear(PSRAM_SCK);
-  nrf_gpio_cfg(PSRAM_SCK, NRF_GPIO_PIN_DIR_OUTPUT, NRF_GPIO_PIN_INPUT_CONNECT, NRF_GPIO_PIN_NOPULL,
-               NRF_GPIO_PIN_S0S1, NRF_GPIO_PIN_NOSENSE);
-  nrf_gpio_cfg_output(PSRAM_MOSI);
+  psramOutput(PSRAM_SCK, true);
+  psramOutput(PSRAM_MOSI, false);
   nrf_gpio_cfg_input(PSRAM_MISO, NRF_GPIO_PIN_PULLDOWN);  // reads 0 if nothing drives it
   nrf_spim_pins_set(s, PSRAM_SCK, PSRAM_MOSI, PSRAM_MISO);
   nrf_spim_frequency_set(s, NRF_SPIM_FREQ_8M);
@@ -411,11 +425,11 @@ static void bbXfer(const uint8_t *tx, size_t txLen, uint8_t *rx, size_t rxLen)
 static void psramBitBang(void)
 {
   nrf_gpio_pin_set(PSRAM_CS);
-  nrf_gpio_cfg_output(PSRAM_CS);
+  psramOutput(PSRAM_CS, false);
   nrf_gpio_pin_clear(PSRAM_SCK);
-  nrf_gpio_cfg_output(PSRAM_SCK);
+  psramOutput(PSRAM_SCK, false);
   nrf_gpio_pin_clear(PSRAM_MOSI);
-  nrf_gpio_cfg_output(PSRAM_MOSI);
+  psramOutput(PSRAM_MOSI, false);
   nrf_gpio_cfg_input(PSRAM_MISO, NRF_GPIO_PIN_PULLDOWN);
 
   static const uint8_t re = 0x66, rst = 0x99;
