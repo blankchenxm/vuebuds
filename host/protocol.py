@@ -1,6 +1,7 @@
 """BLE protocol of the vuebuds "mustard" firmware (see fw/ble_cus.c, fw/ble_manager.c).
 
-control char 0x1403: write 0xB1 to start the camera stream
+control char 0x1403: write 0xB1 to start the camera stream,
+                     0xB2 to take one picture (fw_nrf5340/ only)
 data    char 0x1402: notifications of [seq, flags, payload...]
                      flags bit0 = start of frame; a start-of-frame payload begins with
                      width and height (uint16 little endian each), followed by pixels
@@ -13,13 +14,17 @@ from typing import Callable, Optional
 DEVICE_NAME = "mustard"
 # All DKs advertise as "mustard"; pick one by J-Link serial number and BLE address.
 # nRF52840 DKs run fw/, nRF5340 DKs run fw_nrf5340/ (same BLE protocol).
+# rotate: degrees clockwise that make the picture upright (stereo.py), checked on real
+# pictures with the modules as they sit on the two 5340 DKs (10-07; right board 270, 10-08).
+# dk_board: the board's name for fw_nrf5340/tools/dk5340.ps1 -Board (stereo.py --flash).
 BOARDS = {
     "hm0360": {"snr": "1050291681", "address": "C8:1A:80:9C:01:BC"},
     "hm01b0": {"snr": "1050221517", "address": "D6:25:79:FD:6A:6B"},
     "hm0360-5340": {"snr": "1050035314", "address": "DA:E7:DE:69:E3:5E",
-                    "device": "nRF5340_xxAA_APP", "family": "nrf53"},
+                    "device": "nRF5340_xxAA_APP", "family": "nrf53", "rotate": 90, "dk_board": "HM0360"},
     "hm0360b-5340": {"snr": "1050017384", "address": "EA:F1:6D:2A:C0:BB",
-                    "device": "nRF5340_xxAA_APP", "family": "nrf53"},
+                    "device": "nRF5340_xxAA_APP", "family": "nrf53", "rotate": 270,  # user 10-08: 90 + 180
+                    "dk_board": "HM0360B"},
 }
 # J-Link device / nrfjprog family of the nRF52840 boards (entries without "device").
 DEFAULT_DEVICE = "NRF52840_XXAA"
@@ -29,6 +34,7 @@ _BASE = "47ea{:04x}-a0e4-554e-5282-0afcd3246970"
 DATA_UUID = _BASE.format(0x1402)
 CONTROL_UUID = _BASE.format(0x1403)
 CMD_STREAM_START = 0xB1
+CMD_SNAPSHOT = 0xB2
 
 FLAG_START_OF_FRAME = 0x01
 FRAME_HEADER = struct.Struct("<HH")  # width, height

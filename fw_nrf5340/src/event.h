@@ -15,6 +15,7 @@ typedef enum {
   EVENT_MONITOR_START,
   EVENT_MONITOR_WAKE,
   EVENT_CAMERA_ASLEEP,
+  EVENT_CAMERA_SNAPSHOT,
 } event_t;
 
 void eventQueuePush(event_t event);

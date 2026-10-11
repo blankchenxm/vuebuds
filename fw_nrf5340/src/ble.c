@@ -4,6 +4,7 @@
  *   data    ...1402  notify: [seq, flags, payload...], flags bit0 = start of frame; a
  *                   start-of-frame payload begins with width, height (uint16 LE each)
  *   control ...1403  write 0xB1: start the camera stream (read / notify, 1 byte)
+ *                    write 0xB2: take one picture (not in fw/; see snapshot.h)
  * Like fw/, turning data notifications off or disconnecting reboots the chip.
  */
 #include <string.h>
@@ -24,6 +25,7 @@
 #define PACKET_FLAG_START_OF_FRAME 0x01
 #define CMD_STREAM_START 0xB1
 #define CMD_STREAM_STOP 0xB0
+#define CMD_SNAPSHOT 0xB2
 #define NOTIFY_IN_FLIGHT CONFIG_BT_ATT_TX_COUNT
 #define NOTIFY_WAIT_MS 2000  // no notification completed for this long: give up the frame
 
@@ -63,6 +65,8 @@ static ssize_t controlWrite(struct bt_conn *conn, const struct bt_gatt_attr *att
   NRF_LOG_INFO("writing to 1403 0x%02x", cmd);
   if (cmd == CMD_STREAM_START) {
     eventQueuePush(EVENT_CAMERA_STREAM_START);
+  } else if (cmd == CMD_SNAPSHOT) {
+    eventQueuePush(EVENT_CAMERA_SNAPSHOT);
   }
   // 0xB0 (stream stop) did nothing in fw/ either; the audio / timesync commands are not ported.
   return len;

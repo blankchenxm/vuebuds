@@ -1,6 +1,6 @@
 /*
- * nRF5340 DK port of fw/main.c: camera + BLE streaming (CAM_APP=STREAM, the default) or
- * Monitor (CAM_APP=MONITOR). The main thread runs the same event loop as fw/; it sleeps in
+ * nRF5340 DK port of fw/main.c: camera + BLE streaming (CAM_APP=STREAM, the default; it
+ * also takes single pictures on 0xB2, snapshot.h) or Monitor (CAM_APP=MONITOR). The main thread runs the same event loop as fw/; it sleeps in
  * eventQueueWait() instead of nrf_pwr_mgmt_run(), and sends a frame in one call
  * (bleSendFrame returns once every packet is queued) instead of polling bleService().
  * The VueBuds board's PMU, IMU, buttons, LEDs and CLI are not ported.
@@ -12,6 +12,7 @@
 #include "event.h"
 #include "camera.h"
 #include "monitor.h"
+#include "snapshot.h"
 #include "ble.h"
 #include "i2c.h"
 #include "timers.h"
@@ -19,6 +20,9 @@
 #ifdef CAPTURE_STRESS_US
 extern void stressTestStart(void);
 #endif
+
+// Stream builds take either a continuous stream (0xB1) or single pictures (0xB2) per boot.
+static bool streaming;
 
 static void processEvent(event_t event)
 {
@@ -37,6 +41,11 @@ static void processEvent(event_t event)
       NRF_LOG_RAW_INFO("%08d [main] Monitor build: BLE streaming is disabled\n", systemTimeGetMs());
       break;
 #endif
+      if (snapshotActive()) {
+        NRF_LOG_RAW_INFO("%08d [main] taking single pictures (0xB2): stream start ignored\n", systemTimeGetMs());
+        break;
+      }
+      streaming = true;
       cameraInit();
       cameraStartStream();
 #ifdef CAPTURE_STRESS_US
@@ -44,11 +53,27 @@ static void processEvent(event_t event)
 #endif
       break;
 
+    case EVENT_CAMERA_SNAPSHOT:
+#ifdef CAMERA_APP_MONITOR
+      NRF_LOG_RAW_INFO("%08d [main] Monitor build: single pictures are disabled\n", systemTimeGetMs());
+      break;
+#endif
+      if (streaming) {
+        NRF_LOG_RAW_INFO("%08d [main] streaming (0xB1): picture request ignored\n", systemTimeGetMs());
+        break;
+      }
+      snapshotRequest();
+      break;
+
     case EVENT_CAMERA_CAPTURE_DONE: {
 #ifdef CAMERA_APP_MONITOR
       monitorFrameDone();
       break;
 #endif
+      if (snapshotActive()) {
+        snapshotFrameDone();
+        break;
+      }
       NRF_LOG_RAW_INFO("%08d [cam] EVENT_CAMERA_CAPTURE_DONE\n", systemTimeGetMs());
       camera_frame_t frame;
       if (cameraGetFrame(&frame)) {
@@ -75,6 +100,10 @@ static void processEvent(event_t event)
 
     case EVENT_CAMERA_ASLEEP:
       monitorAsleep();
+      break;
+#else
+    case EVENT_CAMERA_ASLEEP:
+      snapshotAsleep();
       break;
 #endif
 
