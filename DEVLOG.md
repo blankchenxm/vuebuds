@@ -30,7 +30,13 @@
     | Qwen3.5-9B QVGA | 0.96 | 0.25 | 0.19 | 2.9 | 6/9 |
     | Qwen3.5-9B VGA | 1.00 | 0.78 | 0.73 | 0.8 | 5/5 |
     QVGA 下中小字基本读不出,而且会编(把 KRYLON 读成 RAYLYN / HAYLON,把喷漆说成 "Aussie 护发喷雾");VGA 下中字读出约 80–90%、小字约 70%。
-- **遗留 / 下一步**:Qwen2.5-VL-7B、MiniCPM-V 4.5、Gemma 4 E4B 在 OpenRouter 上没有,要本地 Ollama(C 盘只剩约 11 GB,模型要放 D 盘);Moondream 3 没有 Ollama 版。用户核对 `truth.json`、给拼接打分。Warping Residual 官方代码没找到,`multi_h` 是简化版。
+- **10-11 追加:本地 3 个模型 + 手机照片对照**:
+  - Ollama 0.40 装在 D 盘(`D:\Ollama`,模型 `D:\OllamaModels`,约 18 GB),跑 Qwen2.5-VL-7B、MiniCPM-V 4.5、Gemma 4 E4B(RTX 4060,每次 10–50 s)。Moondream 3 这轮不测(用户决定)。
+  - `vlm_eval.py`:本地模型加 `repeat_penalty 1.15`(temperature ≈0 时 Qwen2.5-VL / MiniCPM 会无限重复 "ALMOND ALMOND …" 直到 token 上限,QVGA 第一次跑约一半回答是这样,已全部重跑);Gemma 4 关掉思考(`think: false`,否则思考吃掉大部分 token 预算、正文被截断);`num_ctx 8192`;新增单张图模式(目录里放 `image.png`,用单图提示词)。**本地模型和 API 模型的解码设置不同(repeat_penalty)**。
+  - `host/make_phone_eval.py`(新):用户 10-11 加了 6 个单物品的手机照片(`captures/20261009_phone`,5712×4284),生成 4 个版本:彩色 / 灰度长边 2048、灰度 640×480、灰度 320×240(后两个 = 和 VGA / QVGA 一样多的像素,但没有 HM0360 的镜头 / 噪声)。
+  - 真值改成 **Claude 读手机原图(全分辨率局部)** 的结果,不再用 VGA 图起草;饼干盒手机拍的是另一面,前面分开记;每段文字估了在各图里的大写字母像素高度(±30 %)。`vlm_score.py` 加按像素高度统计"读出率"(`vlm_text_hits.csv`)。
+  - 结果见 Obsidian `HM0360图片VLM理解.md` §9。要点:**大写字母约 8 px 以上基本都能读出,4–6 px 约三分之一,4 px 以下几乎读不出**;VGA 上大部分小字只有 2–6 px。
+- **遗留 / 下一步**:用户核对 `truth.json`(饼干盒正面、万用表标了 verify)、给拼接打分。Warping Residual 官方代码没找到,`multi_h` 是简化版。字高是估计值,每个高度区间的样本数不多。
 
 ## 2026-10-08 · 双板最小流程:"拍一张"命令 0xB2 + 左右同时拍、旋转、拼接(PR #36,Issue #35)
 

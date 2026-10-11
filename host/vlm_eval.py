@@ -10,6 +10,10 @@ Image 2 = right camera), sent at native resolution, with an English prompt:
   python vlm_eval.py captures/stereo/20261009_VGA --models all --task A
   python vlm_eval.py --list                     # known models and backends
 
+Single-picture sets (a phone photo per object, no left / right): each item directory holds
+image.png instead of left.png / right.png; task A then uses SYSTEM_SINGLE / TASK_A_SINGLE.
+  python vlm_eval.py captures/20261009_phone_eval/gray_640 --models qwen2.5-vl-7b --task A
+
 Results: <pair>/vlm/<model>_<task>.json (prompt, raw answer, parsed JSON, time, tokens)
 and <set>/vlm_summary.csv. Existing results are skipped unless --force.
 OpenRouter key: OPENROUTER_API_KEY in the environment or in host/.env (gitignored).
@@ -37,7 +41,7 @@ MODELS = {
     "qwen3-vl-8b": ("openrouter", "qwen/qwen3-vl-8b-instruct", {}),
     "qwen3.5-9b": ("openrouter", "qwen/qwen3.5-9b", {"reasoning": {"enabled": False}}),
     "minicpm-v4.5": ("ollama", "minicpm-v4.5:8b", {}),
-    "gemma4-e4b": ("ollama", "gemma4:e4b", {}),
+    "gemma4-e4b": ("ollama", "gemma4:e4b", {"think": False}),  # thinks by default: ate the token budget
     "moondream3": ("moondream", "moondream3", {}),            # not on OpenRouter / Ollama: not wired yet
 }
 
@@ -64,6 +68,26 @@ After the description, output one JSON block in this format:
  "background": "..."}
 ```"""
 
+SYSTEM_SINGLE = (
+    "You will receive one photo. Answer only from what is actually visible in it. Do not guess, "
+    "infer brand names from typical packaging, or complete partially visible words from memory. "
+    "If text cannot be read, write [unreadable]; if only part of it can be read, give only the "
+    "readable characters and mark the rest with [?]."
+)
+
+TASK_A_SINGLE = """Describe the scene in as much detail as possible.
+
+1. Objects: for every object, say what it is, where it is in the image, its shape, packaging and colors (or how light or dark it is).
+2. Text: transcribe ALL text you can read, character by character. For each piece of text give the object and the position on it, its size (large heading / medium / small print) and your certainty (clear / partial / guess).
+3. Background and surroundings.
+
+After the description, output one JSON block in this format:
+```json
+{"objects": [{"name": "...", "position": "...", "details": "..."}],
+ "texts": [{"text": "...", "object": "...", "size": "large|medium|small", "certainty": "clear|partial|guess"}],
+ "background": "..."}
+```"""
+
 TASK_B = """In these images a person's hand is holding, touching or pointing at one of the objects.
 
 1. Which object is the user holding / touching / pointing at? Which action is it (hold, touch, point)?
@@ -81,7 +105,7 @@ After the answer, output one JSON block in this format:
 
 TASKS = {"A": TASK_A, "B": TASK_B}
 MAX_TOKENS = 2000
-TIMEOUT_S = 300
+TIMEOUT_S = 600  # a local Ollama on a laptop can take minutes per answer
 RETRIES = 6
 
 
@@ -104,16 +128,17 @@ def post_json(url: str, body: dict, headers: dict) -> dict:
         return json.loads(r.read().decode("utf-8"))
 
 
-def ask_openrouter(model: str, extra: dict, prompt: str, images: list[pathlib.Path]) -> dict:
+def ask_openrouter(model: str, extra: dict, prompt: str, images: list[pathlib.Path], system: str = SYSTEM) -> dict:
     key = os.environ.get("OPENROUTER_API_KEY")
     if not key:
         raise RuntimeError("OPENROUTER_API_KEY not set (environment or host/.env)")
     content = [{"type": "text", "text": prompt}]
     for i, p in enumerate(images, 1):
-        content.append({"type": "text", "text": f"Image {i} ({'left' if i == 1 else 'right'} camera):"})
+        if len(images) > 1:
+            content.append({"type": "text", "text": f"Image {i} ({'left' if i == 1 else 'right'} camera):"})
         content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64(p)}"}})
     body = {"model": model, "temperature": 0, "max_tokens": MAX_TOKENS,
-            "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": content}], **extra}
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}], **extra}
     r = post_json("https://openrouter.ai/api/v1/chat/completions", body,
                   {"Authorization": f"Bearer {key}", "X-Title": "vuebuds-vlm-eval"})
     if "error" in r:
@@ -123,13 +148,18 @@ def ask_openrouter(model: str, extra: dict, prompt: str, images: list[pathlib.Pa
             "usage": r.get("usage", {}), "provider": r.get("provider"), "model_returned": r.get("model")}
 
 
-def ask_ollama(model: str, extra: dict, prompt: str, images: list[pathlib.Path]) -> dict:
+def ask_ollama(model: str, extra: dict, prompt: str, images: list[pathlib.Path], system: str = SYSTEM) -> dict:
     host = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
     if not host.startswith("http"):
         host = "http://" + host
-    text = prompt + "\n\nImage 1 is the left camera, Image 2 is the right camera (in that order)."
-    body = {"model": model, "stream": False, "options": {"temperature": 0, "num_predict": MAX_TOKENS},
-            "messages": [{"role": "system", "content": SYSTEM},
+    text = prompt + ("\n\nImage 1 is the left camera, Image 2 is the right camera (in that order)."
+                     if len(images) > 1 else "")
+    # num_ctx: Ollama's default 4096 is too small for two images + prompt + a 2000-token answer.
+    # repeat_penalty: at temperature ~0 the local models fall into loops ("ALMOND ALMOND ..." until
+    # the token limit); 1.15 stops that (2026-10-11). The OpenRouter models run without it.
+    options = {"temperature": 0, "num_predict": MAX_TOKENS, "num_ctx": 8192, "repeat_penalty": 1.15}
+    body = {"model": model, "stream": False, "options": options,
+            "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": text, "images": [b64(p) for p in images]}], **extra}
     r = post_json(f"{host}/api/chat", body, {})
     return {"answer": r["message"]["content"], "finish_reason": r.get("done_reason"),
@@ -159,12 +189,16 @@ def run_one(pair: pathlib.Path, name: str, task: str, force: bool) -> dict:
     backend, model, extra = MODELS[name]
     if backend not in BACKENDS:
         raise RuntimeError(f"{name}: backend '{backend}' not wired up")
-    images = [pair / "left.png", pair / "right.png"]
+    single = (pair / "image.png").exists()
+    images = [pair / "image.png"] if single else [pair / "left.png", pair / "right.png"]
+    system, prompt = (SYSTEM_SINGLE, TASK_A_SINGLE) if single else (SYSTEM, TASKS[task])
+    if single and task != "A":
+        raise RuntimeError("single-picture items only have task A")
     t0 = time.perf_counter()
     last = None
     for attempt in range(RETRIES):
         try:
-            r = BACKENDS[backend](model, extra, TASKS[task], images)
+            r = BACKENDS[backend](model, extra, prompt, images, system)
             break
         except (urllib.error.URLError, RuntimeError, KeyError, TimeoutError) as e:
             last = e
@@ -178,8 +212,9 @@ def run_one(pair: pathlib.Path, name: str, task: str, force: bool) -> dict:
     result = {
         "pair": pair.name, "set": pair.parent.name, "model": name, "backend": backend, "model_id": model,
         "task": task, "time": datetime.datetime.now().isoformat(timespec="seconds"),
-        "seconds": round(time.perf_counter() - t0, 2), "system": SYSTEM, "prompt": TASKS[task],
-        "temperature": 0, "max_tokens": MAX_TOKENS, **r, "parsed": parse_json(r["answer"]),
+        "seconds": round(time.perf_counter() - t0, 2), "system": system, "prompt": prompt,
+        "temperature": 0, "max_tokens": MAX_TOKENS, "repeat_penalty": 1.15 if backend == "ollama" else None,
+        "extra": extra, **r, "parsed": parse_json(r["answer"]),
     }
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -199,7 +234,7 @@ def write_summary(set_dir: pathlib.Path):
             "finish_reason": r.get("finish_reason"), "json_ok": bool(r.get("parsed")),
             "n_objects": len(p.get("objects", [])) if isinstance(p, dict) else "",
             "n_texts": len(p.get("texts", [])) if isinstance(p, dict) else "",
-            "texts": " | ".join(t.get("text", "") for t in p.get("texts", []) if isinstance(t, dict)) if isinstance(p, dict) else "",
+            "texts": " | ".join(str(t.get("text", "")) for t in p.get("texts", []) if isinstance(t, dict)) if isinstance(p, dict) else "",
             "target": target.get("name", "") if isinstance(target, dict) else "",
             "action": target.get("action", "") if isinstance(target, dict) else "",
             "confidence": p.get("confidence", "") if isinstance(p, dict) else "",
@@ -234,7 +269,7 @@ def main(argv: list[str]) -> int:
         return 1
     config = json.loads((args.set_dir / "eval_config.json").read_text(encoding="utf-8")) \
         if (args.set_dir / "eval_config.json").exists() else {}
-    pairs = sorted(p.parent for p in args.set_dir.glob("*/left.png"))
+    pairs = sorted({p.parent for p in [*args.set_dir.glob("*/left.png"), *args.set_dir.glob("*/image.png")]})
     if args.pairs:
         pairs = [p for p in pairs if p.name in args.pairs]
     jobs = [(pair, name, task) for task in args.task for name in names

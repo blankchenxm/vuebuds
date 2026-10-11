@@ -10,6 +10,12 @@ Per answer:
           objects: share of the pair's truth objects mentioned (by keyword)
   task B  target correct: the JSON target names the truth object (by keyword) and no other
 Writes <set>/vlm_scores.csv and prints a model x set table.
+
+Text size: every truth text with a height (cap_px_vga / cap_px_phone_full in truth.json) is
+scored per answer as read (>= 60 % of its words in the answer) or not, with its cap height in
+pixels in that picture: VGA sets cap_px_vga, QVGA half of it, phone sets (captures/*_phone_eval/
+<variant>_<width>) cap_px_phone_full * width / 5712. Writes <set>/vlm_text_hits.csv and prints
+the read rate per model and source by pixel height.
 """
 import csv
 import json
@@ -17,10 +23,12 @@ import pathlib
 import re
 import sys
 from collections import defaultdict
+from typing import Callable, Optional
 
 # Keywords that identify each truth object in an answer (lower case).
 KEYWORDS = {
     "crackers": ["cracker", "sourdough"],
+    "crackers_phone": ["cracker", "sourdough"],  # the box's other face (phone photo)
     "almond": ["almond", "kirkland"],
     "antacid": ["antacid"],
     "ramen": ["ramen", "noodle"],
@@ -66,7 +74,7 @@ def score_answer(r: dict, truth: dict) -> dict:
         # (features often compare the target with the other objects).
         hits = []
         for text in (str(target.get("name", "")), " ".join(str(target.get(k, "")) for k in ("features", "texts"))):
-            hits = [o for o in KEYWORDS if mentions(text, o) and o != "book"]
+            hits = [o for o in pair["objects"] if mentions(text, o) and o != "book"]  # objects in this scene
             if hits:
                 break
         row["truth_target"] = truth_t.get("object", "")
@@ -77,15 +85,64 @@ def score_answer(r: dict, truth: dict) -> dict:
     return row
 
 
+PHONE_FULL_W = 5712
+HEIGHT_BINS = [0, 2, 3, 4, 6, 8, 12, 20, 1e9]
+
+
+def source_of(set_dir: pathlib.Path) -> tuple[str, Callable[[dict], Optional[float]]]:
+    """(source label, text -> cap height in px in this set's pictures, or None)."""
+    name = set_dir.name
+    if name.endswith("_VGA") and not name.endswith("_QVGA"):
+        return "HM0360 VGA", lambda t: t.get("cap_px_vga")
+    if name.endswith("_QVGA"):
+        return "HM0360 QVGA", lambda t: t["cap_px_vga"] / 2 if t.get("cap_px_vga") else None
+    variant, _, width = name.rpartition("_")
+    k = int(width) / PHONE_FULL_W
+    return f"phone {name}", lambda t: t["cap_px_phone_full"] * k if t.get("cap_px_phone_full") else None
+
+
+def text_hits(r: dict, truth: dict, height) -> list[dict]:
+    if r["task"] != "A":
+        return []
+    ans_words = set(words(r.get("answer") or ""))
+    rows = []
+    for o in truth["pairs"][r["pair"]]["objects"]:
+        for t in truth["objects"][o]["texts"]:
+            h = height(t)
+            tw = words(t["text"])
+            if h is None or not tw:
+                continue
+            got = sum(w in ans_words for w in tw) / len(tw)
+            rows.append({"pair": r["pair"], "model": r["model"], "object": o, "text": t["text"], "size": t["size"],
+                         "cap_px": round(h, 1), "words_found": round(got, 2), "read": got >= 0.6})
+    return rows
+
+
+def bin_label(lo, hi):
+    return f"<{hi:g}" if lo == 0 else (f">={lo:g}" if hi > 1e8 else f"{lo:g}-{hi:g}")
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         print(__doc__)
         return 1
     table = defaultdict(lambda: defaultdict(list))
+    by_height = defaultdict(lambda: defaultdict(list))  # (model, source) -> bin -> [read]
     for set_dir in map(pathlib.Path, argv):
         truth = json.loads((set_dir / "truth.json").read_text(encoding="utf-8"))
-        rows = [score_answer(json.loads(f.read_text(encoding="utf-8")), truth)
-                for f in sorted(set_dir.glob("*/vlm/*.json"))]
+        answers = [json.loads(f.read_text(encoding="utf-8")) for f in sorted(set_dir.glob("*/vlm/*.json"))]
+        rows = [score_answer(r, truth) for r in answers]
+        source, height = source_of(set_dir)
+        hits = [h for r in answers for h in text_hits(r, truth, height)]
+        if hits:
+            with open(set_dir / "vlm_text_hits.csv", "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.DictWriter(f, fieldnames=list(hits[0]))
+                w.writeheader()
+                w.writerows(hits)
+        for h in hits:
+            for lo, hi in zip(HEIGHT_BINS, HEIGHT_BINS[1:]):
+                if lo <= h["cap_px"] < hi:
+                    by_height[(h["model"], source)][bin_label(lo, hi)].append(h["read"])
         keys = sorted({k for r in rows for k in r}, key=lambda k: list(rows[0]).index(k) if k in rows[0] else 99)
         with open(set_dir / "vlm_scores.csv", "w", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=keys)
@@ -107,6 +164,13 @@ def main(argv: list[str]) -> int:
             v = t.get(c, [])
             cells.append(f"{sum(v) / len(v):15.2f}" if v else f"{'-':>15s}")
         print(f"{model:14s} {s:15s} " + " ".join(cells))
+    if by_height:
+        labels = [bin_label(lo, hi) for lo, hi in zip(HEIGHT_BINS, HEIGHT_BINS[1:])]
+        print("\ntexts read, by cap height in px in the picture (read / texts)")
+        print(f"{'model':14s} {'source':22s} " + " ".join(f"{l:>8s}" for l in labels))
+        for (model, source), bins in sorted(by_height.items()):
+            cells = [f"{sum(bins[l])}/{len(bins[l])}" if bins.get(l) else "-" for l in labels]
+            print(f"{model:14s} {source:22s} " + " ".join(f"{c:>8s}" for c in cells))
     return 0
 
 
