@@ -143,6 +143,27 @@ class DemoTests(unittest.TestCase):
         self.assertFalse(camera.lock.locked())
         self.assertIsNone(camera.stereo)
 
+    def test_live_success_sends_only_stitched_image(self):
+        images = {"left": self.img, "right": self.img}
+        pair = stereo.Pair(1, False)
+        for side in images:
+            pair.frames[side] = protocol.Frame(1, 24, 32, self.img.tobytes(), 1, 0, .1, time.monotonic())
+        class FakeCamera:
+            def capture(self, *args):
+                yield images, core.pair_info(pair, pair.t_request)
+        pano = np.ones((32, 40), np.uint8)
+        result = stitch.StitchResult("sift", True, pano, 1, {"inliers": 50})
+        with patch.object(core, "auto_stitch", return_value=(result, ["sift ok"], .1)), patch.object(
+                vlm, "stream_answer", return_value=iter([("answer", dict(ttft_s=.1, total_s=.2))])) as stream:
+            final = list(demo.Demo(self.root, FakeCamera()).live(
+                "QVGA", "raw", "auto", "qwen2.5-vl-7b", "A", "stitch", False))[-1]
+        self.assertEqual(stream.call_args.args[2], "stitch")
+        self.assertEqual(len(stream.call_args.args[3]), 1)
+        np.testing.assert_array_equal(stream.call_args.args[3][0], pano)
+        self.assertEqual(final[5], vlm.prompt_text("A", "stitch"))
+        saved = next(self.root.glob("demo_*/*/stitch_sift.png"))
+        np.testing.assert_array_equal(core.read_image(saved), pano)
+
     def test_error_cleanup_drops_ble_links_before_closing_serial(self):
         from unittest.mock import Mock
         camera = core.Camera()
