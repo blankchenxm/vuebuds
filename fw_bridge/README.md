@@ -32,7 +32,7 @@ NCS v3.2.1 under `D:\NRFSDK`, as `fw_nrf5340/`. Sysbuild passes image options as
 
 - Connection interval from the PC (`bridge.Bridge.configure`, default **15 ms**), the same for
   both links; the boards' own requests (fw_nrf5340 asks for 7.5–15 ms after 5 s) are refused.
-- 2M PHY, data length 251, ATT MTU up to 498 (the board decides: fw_nrf5340 has 247 today).
+- 2M PHY, data length 251, ATT MTU 498 (fw_nrf5340 also 498 since 10-11; the smaller side decides).
 - Connection event: default 7.5 ms reservation, extended while the radio is free.
 - Connects one board at a time, reconnects after a drop (the boards reboot on disconnect).
 - PHY / data length / MTU / discovery run on the system work queue: called from the connected

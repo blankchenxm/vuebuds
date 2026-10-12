@@ -1,7 +1,7 @@
 /*
  * BLE central for up to two camera boards. The bridge, not the PC's Bluetooth stack, sets the
  * link: connection interval (from the PC's configure command, the same for both links),
- * 2M PHY, data length 251, ATT MTU 247, and it rejects the boards' own parameter requests
+ * 2M PHY, data length 251, ATT MTU 498, and it rejects the boards' own parameter requests
  * (fw_nrf5340 asks for 7.5-15 ms after 5 s). Connection events are extended while there is
  * radio time (CONFIG_BT_CTLR_SDC_CONN_EVENT_EXTEND_DEFAULT), so one link alone gets the whole
  * interval and two links share it.
