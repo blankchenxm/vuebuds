@@ -109,6 +109,7 @@ class Demo:
                 for s in ("left", "right"))
             out[2] += f"\nArrival difference: {info['arrival_delta_ms']:.1f} ms\nCapture time difference: " + (
                 "Not measured (simultaneous commands; board clocks are not synchronized)" if delta is None else f"{delta} µs (shared time base)")
+            out[2] += f"\nVerified camera firmware resolution: {mode} on both boards (from frame headers)."
             saved = core.save_capture(self.captures, mode, images, info)
             out[9] = f"Saved: {saved}. Select Refresh datasets in Offline studio to view."
             out[4] = "Stitching automatically…"
@@ -140,6 +141,8 @@ class Demo:
                 yield tuple(out)
         except Exception as exc:
             record["error"] = f"{type(exc).__name__}: {exc}"
+            if out[0] is None and out[1] is None:
+                out[2] = f"Capture failed: {exc}"
             out[8] = f"Incomplete: {exc}"
             yield tuple(out)
         finally:

@@ -143,6 +143,16 @@ class DemoTests(unittest.TestCase):
         self.assertFalse(camera.lock.locked())
         self.assertIsNone(camera.stereo)
 
+    def test_live_capture_error_replaces_stale_warmup_message(self):
+        class FakeCamera:
+            def capture(self, *args):
+                yield "Warming up…"
+                raise TimeoutError("Missing: left")
+        final = list(demo.Demo(self.root, FakeCamera()).live(
+            "VGA", "jpeg:85", "auto", "qwen2.5-vl-7b", "A", "pair", False))[-1]
+        self.assertEqual(final[2], "Capture failed: Missing: left")
+        self.assertEqual(final[8], "Incomplete: Missing: left")
+
     def test_live_success_sends_only_stitched_image(self):
         images = {"left": self.img, "right": self.img}
         pair = stereo.Pair(1, False)
