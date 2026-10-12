@@ -21,7 +21,9 @@ streaming to `host/viewer.py`, or Monitor (frames cached in RAM, HM0360 S2 sleep
   (FVLD rise, µs), frame id, exposure registers read after the frame (integration 0x0202/03,
   analog gain 0x0205, digital gain 0x020E/0F), flags (common clock, manual exposure).
   Control commands (multi-byte writes, queued for the main thread):
-  - `B3 <format> <quality>`: image format, 0 raw (only raw so far; PNG / JPEG next).
+  - `B3 <format> <quality>`: image format, 0 raw, 1 PNG, 2 JPEG (quality 1–100, libjpeg scale),
+    encoded on the board (`src/codec*.c`, `lib/README.md`); output in PSRAM (`src/psram.c`) or,
+    without PSRAM, in the frame pool after slot 0. `B4`: codec bench (`host/codec_bench.py`).
   - `B6 00` automatic exposure; `B6 01 <integration u16> <analog gain> <digital gain u16>` fixed
     exposure (HM0360). Fixed values only hold while the sensor streams: a wake from S2 meters
     the scene itself, so with fixed exposure the picture app keeps the sensor awake (no S2).
@@ -30,6 +32,19 @@ streaming to `host/viewer.py`, or Monitor (frames cached in RAM, HM0360 S2 sleep
   usual frame packets, then it sleeps again. A bad frame is retaken (up to 2 times). One boot
   takes either 0xB1 (stream) or 0xB2 (pictures). Used by `host/stereo.py` (two boards;
   `--exposure auto | fixed I A D | sync`).
+
+## Encoders and PSRAM (2026-10-11)
+
+- `lib/jpegenc`, `lib/pngenc`: bitbank2 JPEGENC / PNGenc compiled as C (`src/codec_jpeg.c`,
+  `src/codec_png.c`), JPEGENC patched for numeric quality (`lib/README.md`); state (~50 KB)
+  in the frame pool after slot 0, built with `-O2`. PC check against OpenCV:
+  `tools/codec_test/` (same sources, MinGW gcc).
+- `src/psram.c`: APS6404L on SPIM4 8 MHz (P1.12–P1.15, high drive), ~910 KB/s write,
+  ~780 KB/s read. `-Cflags HW_TEST` checks the whole chip.
+- Measured (VGA 640×480, two boards through the bridge, 64 MHz CPU): JPEG q85 11 KB / 49 dB,
+  encode 0.32 s + BLE 0.28 s (raw: 300 KB, 5.1 s); PNG 96 KB, encode 4.2–4.9 s. QVGA JPEG q85
+  5.7 KB, encode 65 ms. The application core runs at 64 MHz by default; `-Cflags CPU_128MHZ`
+  halves the encode times (VGA JPEG q85 0.16 s, PNG 2.2 s).
 
 ## Wiring
 

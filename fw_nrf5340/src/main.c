@@ -7,6 +7,9 @@
  */
 #include <zephyr/kernel.h>
 #include <zephyr/sys/reboot.h>
+#ifdef CPU_128MHZ
+#include <nrfx_clock.h>
+#endif
 
 #include "nrf_log.h"
 #include "event.h"
@@ -116,6 +119,8 @@ static void processEvent(event_t event)
 #ifndef CAMERA_APP_MONITOR
         if (cmd.data[0] == IMAGE_CMD_SET_EXPOSURE) {
           snapshotExposureChanged();
+        } else if (cmd.data[0] == IMAGE_CMD_CODEC_BENCH && !streaming) {
+          snapshotRequest();  // the bench picture (while streaming: the next streamed frame)
         }
 #endif
       }
@@ -130,6 +135,13 @@ static void processEvent(event_t event)
 
 int main(void)
 {
+#ifdef CPU_128MHZ
+  // Experiment (10-11): the application core runs at 64 MHz by default (HFCLK / 2); 128 MHz as
+  // in nrf/samples/bluetooth/nrf_auraconfig, for the JPEG / PNG encoders.
+  int divErr = nrfx_clock_divider_set(NRF_CLOCK_DOMAIN_HFCLK, NRF_CLOCK_HFCLK_DIV_1);
+  SystemCoreClockUpdate();
+  NRF_LOG_RAW_INFO("[mustard] CPU %u MHz (%d)\n", SystemCoreClock / 1000000, divErr);
+#endif
   NRF_LOG_RAW_INFO("%08d [mustard] booting... (nRF5340)\n", systemTimeGetMs());
   i2cInit();
 #ifdef HW_TEST

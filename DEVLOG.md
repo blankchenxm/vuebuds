@@ -5,6 +5,28 @@
 
 ---
 
+## 2026-10-11 · 板上压缩(JPEG / PNG)+ PSRAM 驱动 + 压缩测试命令(PR #44,Issue #43)
+
+- **阶段**:硬件优化计划阶段 3(压缩)+ PSRAM P2(驱动,用作编码输出)
+- **改了什么**:
+  - `fw_nrf5340/lib/`(新):bitbank2 **JPEGENC**、**PNGenc**(Apache-2.0,原样复制,来源和 commit 见 `lib/README.md`)。JPEGENC 只有 4 档固定质量 → **补丁** `JPEGEQuant()`:0–3 保持原样,`JPEGE_Q_IJG + q` 按 libjpeg 公式缩放量化表(q95 / 90 / 85 / 75 / 60 和 OpenCV 同义)。PNGenc 的 C 原型有两处错,在 `codec_png.c` 里用宏绕开(库文件不改)。
+  - `src/codec.c`、`codec_jpeg.c`、`codec_png.c`(新):8 位灰度 JPEG(4:4:4)/ PNG(zlib 级别 6,4 KB 窗口)编码,输出走 `codec_io_t`(PNG 结束时要回读、跳转)。编码器状态约 50 KB,**放在帧池槽 0 之后**,不占 .bss(Monitor 的槽数不变)。编码器文件用 `-O2`。
+  - `src/psram.c`(新):APS6404L 驱动(SPIM4 8 MHz、强驱动、1 KB 页内突发、命令和数据两段传输不复制)。
+  - `src/image.c`:非原始格式先编码到 PSRAM(没有 PSRAM 时到帧池剩余 RAM),再从那里发 BLE;编码失败就发原始图。`B3` 现在接受 PNG / JPEG;**`B4` 压缩测试**:下一张同一帧依次发 原始、PNG、JPEG q95 / 90 / 85 / 75 / 60(帧号相同),RTT 打印每种的大小和编码耗时。
+  - `src/capture/frame_pool.c`:`frame_pool_after(n)`(前 n 个槽之后的内存)。
+  - `src/main.c`:`-Cflags CPU_128MHZ` 实验选项(应用核默认 64 MHz)。
+  - `tools/codec_test/`(新):同一份编码器源码用 MinGW gcc 在电脑上编译,和 OpenCV 比体积 / PSNR / PNG 是否无损。
+  - `host/codec_bench.py`(新):经桥发 `B4`,统计体积、PSNR、BLE 时间、板上编码时间(RTT 不复位挂上),文件存 `captures/codec/`,结果追加 `logs/codec_bench.csv`。`host/stereo.py --format raw|png|jpeg:Q`。
+- **为什么**:传输是瓶颈;压缩必须在板上、发送前做。用户 10-10 要求 PNG 和 JPEG q95 / 90 / 85 / 75 / 60 都在板上实现、运行时用命令选。
+- **和原代码的行为差异**:默认格式仍是原始图(行为不变),只有发了 `B3` / `B4` 才压缩。新命令 `B4`。
+- **验证**:
+  - 电脑端(实拍 VGA 480×640):固件编码器和 OpenCV 体积差 ≤ 2%、PSNR 差 ≤ 0.4 dB(q85:19.5 对 19.7 KB,47.4 对 47.5 dB);PNG 解码后和原图逐字节一致。
+  - 板上 QVGA(HM0360 板,2 轮):原始 75 KB / BLE 0.75 s;PNG 32.7 KB,编码 654 ms;JPEG q95 12.8 KB / 47.3 dB / 84 ms,q85 5.7 KB / 45.3 dB / 65 ms,q60 3.2 KB / 43.0 dB / 60 ms。
+  - 板上 VGA,**两块板同时经桥**(3 轮):原始 300 KB / BLE 5.1 s;PNG 96 KB,编码 4.8–5.0 s;JPEG q95 30–32 KB / 50.8 dB / 编码 0.38 s + BLE 0.61 s;**q85 11 KB / 49.1 dB / 0.32 s + 0.28 s**;q60 5–7 KB / 47.2 dB / 0.31 s + 0.09 s。
+  - `-O2`:JPEG 321 → 313 ms,PNG 4.9 → 4.2 s。**128 MHz**(`CPU_128MHZ`):JPEG q85 313 → 161 ms,PNG 4.2 → 2.2 s,无坏帧。
+  - 两块板都检测到 PSRAM(`ID 0d 5d`),输出在 PSRAM。
+- **遗留 / 下一步**:是否默认 128 MHz(功耗,待用户决定);PNG 在板上太慢(VGA 2–5 s),预计最终用 JPEG;把收到的图送 VLM 比 OCR(`host/vlm_eval.py` 在另一个分支)。
+
 ## 2026-10-11 · 帧头 v2 + 每帧曝光记录 + 手动 / 同步曝光(PR #42,Issue #41)
 
 - **阶段**:硬件优化计划阶段 2(帧头 v2)+ 阶段 5 的 X1 / X2 / X3(曝光)

@@ -48,3 +48,14 @@ uint8_t *frame_pool_slot(uint32_t index)
   }
   return POOL_START + index * m_slot_size + m_lead;
 }
+
+uint8_t *frame_pool_after(uint32_t slots, uint32_t *size)
+{
+  uint8_t *p = POOL_START + (uintptr_t)slots * m_slot_size;
+  if (slots > m_slot_count || m_slot_size == 0) {
+    *size = 0;
+    return NULL;
+  }
+  *size = (uint32_t)(POOL_END - p);
+  return p;
+}

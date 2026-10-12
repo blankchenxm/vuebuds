@@ -7,6 +7,7 @@ on both (control command 0xB2) at the same time, rotate each and show them side 
   python stereo.py --rotate-left 180        # override a board's rotation (degrees clockwise)
   python stereo.py --exposure sync          # left board AE, the right board copies its exposure
   python stereo.py --exposure fixed 200 0 0x100   # both boards the same fixed exposure (registers)
+  python stereo.py --format jpeg:85         # the boards send JPEG q85 (encoded on the board; or png)
   python stereo.py --bridge                 # through the BLE-USB bridge (fw_bridge/) instead of
                                             # Windows Bluetooth; both 0xB2 go out in one bridge command
 
@@ -136,9 +137,10 @@ class Stereo:
     """Owns both connections on one asyncio loop (background thread)."""
 
     def __init__(self, log: SessionLog, boards: dict[str, str], bridge_port: Optional[str] = None,
-                 interval_ms: float = 15.0, exposure: tuple = ("auto",)):
+                 interval_ms: float = 15.0, exposure: tuple = ("auto",), image_format: tuple = (0, 0)):
         self.log = log
         self.exposure = exposure
+        self.image_format = image_format  # (protocol.FORMAT_*, quality)
         self.bridge = None
         if bridge_port is not None:
             import bridge
@@ -196,7 +198,8 @@ class Stereo:
                     client.write_gatt_char(protocol.CONTROL_UUID, data, response=False), self._loop)
 
     def apply_exposure(self):
-        """--exposure: auto (both AE), fixed (both the same values), sync (left AE, right follows)."""
+        """--format, then --exposure: auto (both AE), fixed (both the same values), sync (left AE, right follows)."""
+        self.send(SIDES, protocol.set_format_command(*self.image_format))
         mode = self.exposure[0]
         if mode == "fixed":
             self.send(SIDES, protocol.set_exposure_command(*self.exposure[1:]))
@@ -360,6 +363,8 @@ def main():
     ap.add_argument("--exposure", nargs="+", default=["auto"], metavar="MODE",
                     help="auto (both AE, default) | fixed INTEGRATION ANALOG_GAIN DIGITAL_GAIN (register values, "
                          "both boards) | sync (left AE, the right board takes the left's values for the next pair)")
+    ap.add_argument("--format", default="raw", metavar="FMT",
+                    help="image format the boards send: raw (default) | png | jpeg:QUALITY (1-100), encoded on the board")
     ap.add_argument("--height", type=int, default=640, help="display height of each picture (pixels)")
     ap.add_argument("--auto", type=int, default=0, help="take and save N pairs automatically, then quit")
     ap.add_argument("--interval", type=float, default=2.0, help="with --auto: seconds between pairs")
@@ -384,7 +389,16 @@ def main():
         exposure = ("fixed",) + tuple(int(x, 0) for x in exposure[1:])
     elif exposure[0] not in ("auto", "sync") or len(exposure) != 1:
         ap.error("--exposure auto | fixed I A D | sync")
-    st = Stereo(log, boards, args.bridge, args.interval_ms, exposure)
+    fmt = args.format.lower()
+    if fmt == "raw":
+        image_format = (protocol.FORMAT_RAW, 0)
+    elif fmt == "png":
+        image_format = (protocol.FORMAT_PNG, 0)
+    elif fmt.startswith("jpeg:") and fmt[5:].isdigit() and 1 <= int(fmt[5:]) <= 100:
+        image_format = (protocol.FORMAT_JPEG, int(fmt[5:]))
+    else:
+        ap.error("--format raw | png | jpeg:QUALITY")
+    st = Stereo(log, boards, args.bridge, args.interval_ms, exposure, image_format)
     h = args.height
     canvas = np.zeros((h, h * 3 // 2, 3), np.uint8)
     shown: Optional[tuple[Pair, dict[str, np.ndarray]]] = None  # pair on screen, its rotated pictures

@@ -8,7 +8,7 @@ data    char 0x1402: notifications of [seq, flags, payload...]
                      flags bit1 = frame header v2 (fw_nrf5340, 2026-10-11): the payload begins
                      with HEADER_V2 (FrameHeaderV2 below), then `length` image bytes
                      (format 0 raw gray, 1 PNG, 2 JPEG)
-control 0x1403: 0xB3 <format> <quality> image format; 0xB6 00 auto exposure,
+control 0x1403: 0xB3 <format> <quality> image format; 0xB4 codec bench; 0xB6 00 auto exposure,
                 0xB6 01 <integration u16> <analog gain u8> <digital gain u16> fixed exposure
 """
 import struct
@@ -41,6 +41,7 @@ CONTROL_UUID = _BASE.format(0x1403)
 CMD_STREAM_START = 0xB1
 CMD_SNAPSHOT = 0xB2
 CMD_SET_FORMAT = 0xB3
+CMD_CODEC_BENCH = 0xB4  # next picture sent raw, PNG, JPEG q95 / 90 / 85 / 75 / 60 (same frame id)
 CMD_SET_EXPOSURE = 0xB6
 FORMAT_RAW, FORMAT_PNG, FORMAT_JPEG = 0, 1, 2
 FORMAT_NAMES = {FORMAT_RAW: "raw", FORMAT_PNG: "png", FORMAT_JPEG: "jpeg"}
