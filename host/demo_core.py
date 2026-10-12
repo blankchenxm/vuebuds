@@ -46,14 +46,14 @@ def read_image(path, color=False):
     # imdecode handles Windows paths with non-ASCII characters across OpenCV versions.
     image = cv2.imdecode(np.fromfile(path, np.uint8), cv2.IMREAD_COLOR if color else cv2.IMREAD_GRAYSCALE)
     if image is None:
-        raise ValueError(f"图片无法读取: {path}")
+        raise ValueError(f"Cannot read image: {path}")
     return image
 
 
 def write_image(path, image):
     ok, encoded = cv2.imencode(".png", image)
     if not ok:
-        raise ValueError(f"图片保存失败: {path}")
+        raise ValueError(f"Cannot save image: {path}")
     encoded.tofile(path)
 
 
@@ -64,7 +64,7 @@ def datasets(root):
         return found
     loose = [p for p in root.iterdir() if p.is_dir() and (p / "left.png").is_file() and (p / "right.png").is_file()]
     if loose:
-        found["未分组拍摄"] = sorted(loose)
+        found["Ungrouped captures"] = sorted(loose)
     for directory in sorted(root.iterdir()):
         if directory.is_dir():
             pairs = sorted(p.parent for p in directory.glob("*/left.png") if (p.parent / "right.png").is_file())
@@ -78,16 +78,16 @@ def resolve_pair(root, dataset, name):
     for pair in pairs:
         if pair.name == name:
             return pair
-    raise ValueError("请先选择有效的数据集和一组图片。")
+    raise ValueError("Select a valid dataset and image pair first.")
 
 
 def run_stitch(left, right, method):
     if method not in stitch.DEFAULT_METHODS:
-        raise ValueError("未知拼接方法")
+        raise ValueError("Unknown stitching method")
     t0 = time.perf_counter()
     try:
         if method in ("lightglue", "loftr") and not stitch.matcher_available(method):
-            raise RuntimeError(f"未安装 {method} 的可选依赖，请查看 host/requirements.txt")
+            raise RuntimeError(f"Optional dependencies for {method} are missing. See host/requirements.txt.")
         return stitch.build_methods()[method](left, right)
     except Exception as exc:
         return stitch.StitchResult(method, False, None, (time.perf_counter() - t0) * 1000,
@@ -191,37 +191,37 @@ class Camera:
         st.done.clear()
         requested = time.monotonic()
         if not st.trigger(warmup=warmup):
-            raise RuntimeError("无法触发拍摄；请检查双板连接。")
+            raise RuntimeError("Cannot trigger capture; check both camera connections.")
         deadline = time.monotonic() + 45
         while time.monotonic() < deadline:
             errors = [(slot, err) for stamp, slot, err in st.bridge.write_results if stamp >= requested and err]
             if errors:
-                raise RuntimeError(f"桥转发拍照命令失败：{errors}")
+                raise RuntimeError(f"Bridge failed to forward capture command: {errors}")
             if st.done:
                 pair = st.done.popleft()
                 if any(f.lost_packets for f in pair.frames.values()):
-                    raise RuntimeError("本对图像丢包，已丢弃；请重新拍摄。")
+                    raise RuntimeError("Packet loss detected. This pair was discarded; capture again.")
                 return pair
             if not st.ready:
-                raise RuntimeError("拍摄时开发板断开，请检查 USB 和 BLE。")
+                raise RuntimeError("A board disconnected during capture. Check USB and BLE.")
             if st.pending is None and not st.done:
-                raise RuntimeError("拍照命令失败，请重新连接。")
+                raise RuntimeError("Capture command failed. Reconnect the cameras.")
             time.sleep(0.03)
         pending = st.pending
         missing = [s for s in stereo.SIDES if s not in pending.frames] if pending else list(stereo.SIDES)
-        raise TimeoutError(f"双板收图超时（45 秒），未收到 {', '.join(missing)}；请检查对应传感器连接。")
+        raise TimeoutError(f"Capture timed out after 45 seconds. Missing: {', '.join(missing)}; check the corresponding sensor connection.")
 
     def capture(self, mode, fmt, exposure, clicked):
         """Yield progress strings, then (images, timing metadata)."""
         if mode not in MODES or fmt not in FORMATS or exposure not in ("auto", "sync"):
-            raise ValueError("无效的拍摄设置")
+            raise ValueError("Invalid capture settings")
         if not self.lock.acquire(blocking=False):
-            raise RuntimeError("硬件正在拍摄或烧录，请等待当前操作完成。")
+            raise RuntimeError("Hardware is capturing or flashing. Wait for the current operation to finish.")
         try:
             if self.requires_flash:
-                raise RuntimeError("上次双板烧录未完成，请先重新烧录两块板。")
+                raise RuntimeError("The previous flash was incomplete. Flash both boards again first.")
             if self.stereo is None:
-                yield "正在连接 BLE-USB 桥和两块相机板…"
+                yield "Connecting the BLE-USB bridge and both cameras…"
                 # A previous CLI/DEMO may have left streaming or an unfinished request on the bridge.
                 # Start a fresh camera session, then keep it open across subsequent pictures.
                 bridge.release(self.port or None)
@@ -231,26 +231,26 @@ class Camera:
             while not st.ready and time.monotonic() < deadline:
                 time.sleep(0.1)
             if not st.ready:
-                raise TimeoutError("双板未就绪，请检查供电、桥的 nRF USB 线，关闭 stereo.py 等占用串口的程序。")
+                raise TimeoutError("Cameras are not ready. Check power and the bridge nRF USB cable; close other serial clients such as stereo.py.")
             changed = self.settings != (fmt, exposure)
             if changed or st.needs_warmup:
                 st.image_format, st.exposure = FORMATS[fmt], (exposure,)
                 st.apply_exposure()
                 # B3/B6 are queued writes on the bridge. Give both links several connection events.
                 time.sleep(0.15)
-                yield "正在预热并应用压缩/曝光设置；预热图片不计入拍照耗时…"
+                yield "Warming up and applying compression / exposure settings. Warm-up frames are excluded from capture timing…"
                 self._take(warmup=True)
                 # In sync mode the previous left exposure is now applied to the right board.
                 time.sleep(0.15)
                 self.settings = (fmt, exposure)
-            yield "正在同时请求左右板拍照并接收图片…"
+            yield "Requesting both cameras simultaneously and receiving images…"
             pair = self._take()
             if any((f.width, f.height) != MODES[mode] for f in pair.frames.values()):
                 sizes = ", ".join(f"{s}: {f.width}×{f.height}" for s, f in pair.frames.items())
-                raise RuntimeError(f"实际尺寸 {sizes} 与所选 {mode} 不同。请先按「烧录所选分辨率到双板」。")
+                raise RuntimeError(f"Received dimensions {sizes} do not match {mode}. Select Flash both cameras first.")
             expected_fmt, expected_q = FORMATS[fmt]
             if any(f.format != expected_fmt or (expected_fmt == 2 and f.quality != expected_q) for f in pair.frames.values()):
-                raise RuntimeError("板端返回格式与选择不同，可能压缩失败或固件过旧，请检查板端日志/重新烧录。")
+                raise RuntimeError("The received format differs from the selection. Check board logs or reflash; compression may have failed or firmware may be outdated.")
             images = {s: stereo.to_image(f, protocol.BOARDS[BOARDS[s]]["rotate"]) for s, f in pair.frames.items()}
             yield images, pair_info(pair, clicked)
         except BaseException:
@@ -261,16 +261,16 @@ class Camera:
 
     def flash(self, mode):
         if mode not in MODES:
-            raise ValueError("请选择 QVGA 或 VGA")
+            raise ValueError("Select QVGA or VGA")
         if not self.lock.acquire(blocking=False):
-            raise RuntimeError("硬件正在使用，请等待。")
+            raise RuntimeError("Hardware is busy. Please wait.")
         process = None
         try:
             self.close()
             self.requires_flash = True
             script = HERE.parent / "fw_nrf5340" / "tools" / "dk5340.ps1"
             for side, board in BOARDS.items():
-                yield f"正在编译并烧录 {side} / {mode}，请保持 USB 连接…"
+                yield f"Building and flashing {side} / {mode}. Keep USB connected…"
                 process = subprocess.Popen([
                     "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
                     "flash", "-Mode", mode, "-Board", protocol.BOARDS[board]["dk_board"]],
@@ -296,16 +296,16 @@ class Camera:
                         tail.append(line)
                         tail = tail[-20:]
                     if time.monotonic() - last > 0.5:
-                        yield f"{side} / {mode} · {time.monotonic() - start:.0f} 秒\n" + "\n".join(tail)
+                        yield f"{side} / {mode} · {time.monotonic() - start:.0f} seconds\n" + "\n".join(tail)
                         last = time.monotonic()
                 code = process.wait()
                 worker.join()
                 process.stdout.close()
                 if code:
-                    raise RuntimeError(f"{side} 烧录失败 ({code})\n" + "\n".join(tail))
-                yield f"{side} / {mode} 烧录完成。"
+                    raise RuntimeError(f"{side} flash failed ({code})\n" + "\n".join(tail))
+                yield f"{side} / {mode} flash complete."
             self.requires_flash = False
-            yield f"双板 {mode} 烧录完成，可点击拍摄。首次拍摄会重新连接和预热。"
+            yield f"Both cameras are flashed for {mode}. Ready to capture; the first capture reconnects and warms up."
         finally:
             # Flash must finish once started; do not terminate a programmer mid-write on a UI disconnect.
             if process is not None and process.poll() is None:

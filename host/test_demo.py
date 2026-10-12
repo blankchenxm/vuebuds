@@ -102,7 +102,7 @@ class DemoTests(unittest.TestCase):
             result = list(app.offline_answer("QVGA", "pair01", "sift", {"key": ["QVGA", "other", "sift"],
                 "image": self.img}, "qwen2.5-vl-7b", "A", "stitch"))
         stream.assert_not_called()
-        self.assertIn("失败", result[-1][2])
+        self.assertIn("failed", result[-1][2])
 
     def test_capture_clock_only_compared_when_common_and_wrap_safe(self):
         pair = stereo.Pair(1, False)
@@ -184,7 +184,7 @@ class DemoTests(unittest.TestCase):
             return True
         camera.stereo = types.SimpleNamespace(done=deque(), trigger=trigger, bridge=link, pending=None)
         try:
-            with self.assertRaisesRegex(RuntimeError, "桥转发"):
+            with self.assertRaisesRegex(RuntimeError, "Bridge failed to forward"):
                 camera._take()
         finally:
             camera.stereo = None

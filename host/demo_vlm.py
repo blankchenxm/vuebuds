@@ -77,7 +77,7 @@ def stream_answer(name, task, source, images, *, timeout=vlm.TIMEOUT_S):
     else:
         key = os.environ.get("OPENROUTER_API_KEY")
         if not key:
-            raise RuntimeError("未配置 OPENROUTER_API_KEY，请使用 --env-file 或选择本地 Ollama 模型。")
+            raise RuntimeError("OPENROUTER_API_KEY is missing. Use --env-file or select a local Ollama model.")
         url = "https://openrouter.ai/api/v1/chat/completions"
         headers.update(Authorization=f"Bearer {key}", **{"X-Title": "vuebuds-demo"})
         content = [{"type": "text", "text": prompt}] + [
@@ -91,7 +91,7 @@ def stream_answer(name, task, source, images, *, timeout=vlm.TIMEOUT_S):
     with urllib.request.urlopen(req, timeout=timeout) as response:
         for raw in response:
             if time.perf_counter() - started > timeout:
-                raise TimeoutError("VLM 超过请求时限")
+                raise TimeoutError("VLM request timed out")
             line = raw.decode("utf-8").strip()
             if not line:
                 continue
@@ -104,7 +104,7 @@ def stream_answer(name, task, source, images, *, timeout=vlm.TIMEOUT_S):
                     break
             msg = json.loads(line)
             if "error" in msg:
-                raise RuntimeError(f"VLM 服务错误: {msg['error']}")
+                raise RuntimeError(f"VLM service error: {msg['error']}")
             if backend == "ollama":
                 piece = msg.get("message", {}).get("content", "")
                 if msg.get("done"):
@@ -128,8 +128,8 @@ def stream_answer(name, task, source, images, *, timeout=vlm.TIMEOUT_S):
             if backend == "ollama" and finished:
                 break
     if not finished:
-        raise RuntimeError("VLM 流意外中断；当前文字只是部分回答，请重试。")
+        raise RuntimeError("VLM stream interrupted. The displayed answer is incomplete; try again.")
     if not answer.strip():
-        raise RuntimeError("VLM 返回了空回答。")
+        raise RuntimeError("VLM returned an empty answer.")
     stats["total_s"] = time.perf_counter() - started
     yield answer, stats.copy()
