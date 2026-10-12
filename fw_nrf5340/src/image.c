@@ -8,6 +8,7 @@
 #include "psram.h"
 #include "timers.h"
 #include "image.h"
+#include "timesync.h"
 
 #define PNG_LEVEL 6  // zlib default; the PC check (tools/codec_test) matched OpenCV's PNG size
 #define BENCH_FORMATS 7
@@ -175,7 +176,14 @@ void imagePrepare(const camera_frame_t *frame)
   memset(&m_header, 0, sizeof(m_header));
   m_header.width = frame->width;
   m_header.height = frame->height;
-  m_header.capture_us = stats->start_us;
+  // FVLD rise: hardware time (RTC0 capture), on the bridge's clock once it sent a reference.
+  uint64_t bridge_us;
+  if (timesyncLocalToBridge(timesyncLastFvldUs(), &bridge_us)) {
+    m_header.capture_us = (uint32_t)bridge_us;
+    m_header.flags |= BLE_HEADER_COMMON_CLOCK;
+  } else {
+    m_header.capture_us = stats->start_us;
+  }
   camera_exposure_t e;
   if (cameraReadExposure(&e)) {
     m_header.integration = e.integration;

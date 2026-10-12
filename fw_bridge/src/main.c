@@ -7,6 +7,8 @@
  *   'C'  [interval u16 (1.25 ms)][n][n x (type u8, addr 6 B LSB first)]: boards for slots 0..n-1
  *   'W'  [slot mask][bytes]: write the bytes to the control characteristic of those slots
  *   'X'  [slot mask]: disconnect (the boards reboot, the bridge reconnects)
+ *   'T'  [slot mask][delay ms u16][camera command]: timed command at one bridge time T for all
+ *        (central.h centralTimedWrite; 0xB7 = picture at T)
  * Bridge -> PC: [A5 5A][type][slot][len u16 LE][payload], types in central.h.
  *
  * Build with -Dfw_bridge_USB_TEST=1 for the USB link test instead (src/usb_test.c, host/usb_test.py).
@@ -50,6 +52,11 @@ static void handle(uint8_t cmd, const uint8_t *p, uint16_t len)
     case 'W':
       if (len >= 2) {
         centralWrite(p[0], p + 1, len - 1);
+      }
+      break;
+    case 'T':
+      if (len >= 4) {
+        centralTimedWrite(p[0], p[1] | (p[2] << 8), p[3]);
       }
       break;
     case 'X':

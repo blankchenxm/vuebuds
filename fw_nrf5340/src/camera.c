@@ -17,6 +17,7 @@
 #include "pins.h"
 #include "timers.h"
 #include "i2c.h"
+#include "timesync.h"
 
 // Mode and test pattern are compile-time choices (no runtime switching).
 #ifndef CAMERA_MODE
@@ -292,6 +293,17 @@ void cameraWake(void)
     nrf_delay_us(CAMERA_XSLEEP_SETTLE_US);  // >= 10 us from XSLEEP high to I2C
     writeExposure();
   }
+}
+
+bool cameraWakeAt(uint64_t local_us)
+{
+  if (sleepState != CAMERA_ASLEEP || !timesyncWakeAt(local_us)) {
+    return false;
+  }
+  // MCLK starts 2 ms before local_us (kernel timer), DPPI sets XSLEEP at local_us. Fixed
+  // exposure keeps the sensor awake, so nothing is pending here.
+  sleepState = CAMERA_AWAKE;
+  return true;
 }
 
 void cameraSleepOnFrameBoundary(void)

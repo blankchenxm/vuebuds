@@ -22,6 +22,7 @@
 #include "event.h"
 #include "timers.h"
 #include "ble.h"
+#include "timesync.h"
 
 #define ADV_INTERVAL 300  // 187.5 ms in 0.625 ms units, as fw/main.h APP_ADV_INTERVAL
 #define PACKET_FLAG_START_OF_FRAME 0x01
@@ -176,6 +177,7 @@ void bleInit(void)
     NRF_LOG_RAW_INFO("[ble] bt_enable failed (%d)\n", err);
     return;
   }
+  timesyncBleReady();
   err = bt_le_adv_start(BT_LE_ADV_PARAM(BT_LE_ADV_OPT_CONN, ADV_INTERVAL, ADV_INTERVAL, NULL), advData,
                         ARRAY_SIZE(advData), NULL, 0);
   if (err) {

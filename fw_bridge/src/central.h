@@ -38,5 +38,8 @@ void centralConfigure(const bt_addr_le_t *addrs, uint8_t count, uint16_t interva
 void centralWrite(uint8_t mask, const uint8_t *data, uint16_t len);
 /* Drop the links in mask; they reconnect by themselves (the camera reboots on disconnect). */
 void centralDisconnect(uint8_t mask);
+/* Time sync: write [cmd][this link's anchor u64][counter u16][T u64] to every ready slot in mask,
+ * T = the newest anchor point + delay_ms (the same T for all), e.g. cmd 0xB7 = picture at T. */
+void centralTimedWrite(uint8_t mask, uint16_t delay_ms, uint8_t cmd);
 
 #endif

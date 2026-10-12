@@ -53,6 +53,23 @@ void snapshotRequest(void)
   m_busy = true;
 }
 
+void snapshotRequestAt(uint64_t local_us)
+{
+  if (m_busy || !m_started || !m_s2 || cameraExposureManual() || !cameraIsAsleep()) {
+    NRF_LOG_RAW_INFO("%08d [snap] timed request taken now (busy %d, started %d, asleep %d)\n", systemTimeGetMs(),
+                     m_busy, m_started, cameraIsAsleep());
+    snapshotRequest();
+    return;
+  }
+  m_request_ms = systemTimeGetMs();
+  cameraArmSlot(SNAPSHOT_SLOT, 0);
+  if (!cameraWakeAt(local_us)) {
+    NRF_LOG_RAW_INFO("%08d [snap] wake time too close, waking now\n", systemTimeGetMs());
+    cameraWake();
+  }
+  m_busy = true;
+}
+
 void snapshotFrameDone(void)
 {
   if (!m_busy) {

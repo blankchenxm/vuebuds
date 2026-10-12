@@ -35,7 +35,7 @@ typedef struct __packed {
 typedef size_t (*ble_reader_t)(void *ctx, uint32_t offset, uint8_t *dst, size_t n);
 
 /* Multi-byte control commands (0xB3 ...), queued for the main thread (EVENT_BLE_COMMAND). */
-#define BLE_COMMAND_MAX 16
+#define BLE_COMMAND_MAX 24  // 0xB7: 1 + 8 + 2 + 8 bytes
 typedef struct {
   uint8_t len;
   uint8_t data[BLE_COMMAND_MAX];

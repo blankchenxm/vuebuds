@@ -131,14 +131,17 @@ class Pair:
         self.t_request = time.monotonic()
         self.t_written: dict[str, float] = {}
         self.frames: dict[str, protocol.Frame] = {}
+        self.capture_offset_us: Optional[int] = None  # right - left FVLD rise, bridge clock
 
 
 class Stereo:
     """Owns both connections on one asyncio loop (background thread)."""
 
     def __init__(self, log: SessionLog, boards: dict[str, str], bridge_port: Optional[str] = None,
-                 interval_ms: float = 15.0, exposure: tuple = ("auto",), image_format: tuple = (0, 0)):
+                 interval_ms: float = 15.0, exposure: tuple = ("auto",), image_format: tuple = (0, 0),
+                 sync: bool = True):
         self.log = log
+        self.sync = sync and bridge_port is not None
         self.exposure = exposure
         self.image_format = image_format  # (protocol.FORMAT_*, quality)
         self.bridge = None
@@ -213,11 +216,17 @@ class Stereo:
             self.send(["right"], protocol.set_exposure_command(left.integration, left.analog_gain, left.digital_gain))
 
     def _trigger_bridge(self, pair: Pair):
-        # One bridge command: the bridge writes 0xB2 to both links back to back.
-        self.bridge.write(0b11, bytes([protocol.CMD_SNAPSHOT]))
+        if self.sync and not pair.warmup:
+            # Plan E1: both boards wake their sensor at one bridge time T (80 ms ahead).
+            self.bridge.timed_write(0b11, protocol.CMD_SNAPSHOT_AT, 80)
+            what = "0xB7 (picture at T) sent to the bridge"
+        else:
+            # Plan A: the bridge writes 0xB2 to both links back to back.
+            self.bridge.write(0b11, bytes([protocol.CMD_SNAPSHOT]))
+            what = "0xB2 sent to the bridge"
         t = time.monotonic()
         pair.t_written = {"left": t, "right": t}
-        self.log("host", f"pair {pair.index}{' (warm-up)' if pair.warmup else ''}: 0xB2 sent to the bridge")
+        self.log("host", f"pair {pair.index}{' (warm-up)' if pair.warmup else ''}: {what}")
 
     def trigger(self, warmup: bool = False) -> bool:
         with self._lock:
@@ -259,6 +268,11 @@ class Stereo:
             self.log(side, f"pair {pair.index}: {frame.width}x{frame.height} lost={frame.lost_packets} "
                            f"rx {frame.duration_s:.2f}s, +{(frame.completed_at - pair.t_request):.2f}s after request{exp}")
             if len(pair.frames) == 2:
+                l, r = pair.frames["left"], pair.frames["right"]
+                if l.capture_us is not None and l.header_flags & r.header_flags & protocol.HEADER_COMMON_CLOCK:
+                    d = (r.capture_us - l.capture_us + 2 ** 31) % 2 ** 32 - 2 ** 31
+                    pair.capture_offset_us = d
+                    self.log("host", f"pair {pair.index}: right - left capture time {d / 1000:+.3f} ms (bridge clock)")
                 self.done.append(pair)
                 self.pending = None
                 if self.exposure[0] == "sync":
@@ -323,6 +337,7 @@ def save_pair(pair: Pair, images: dict[str, np.ndarray], rotations: dict[str, in
         "exposure": {s: pair.frames[s].exposure for s in SIDES},
         "format": {s: protocol.FORMAT_NAMES.get(pair.frames[s].format, pair.frames[s].format) for s in SIDES},
         "bytes": {s: len(pair.frames[s].data) for s in SIDES},
+        "capture_offset_us": pair.capture_offset_us,
     }
     (out / "info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
     return out
@@ -360,6 +375,8 @@ def main():
     ap.add_argument("--bridge", nargs="?", const="", default=None, metavar="PORT",
                     help="use the BLE-USB bridge (COM port, default: found by USB VID)")
     ap.add_argument("--interval-ms", type=float, default=15.0, help="with --bridge: connection interval")
+    ap.add_argument("--no-sync", action="store_true",
+                    help="with --bridge: plain 0xB2 to both (plan A) instead of a picture at one bridge time (plan E1)")
     ap.add_argument("--exposure", nargs="+", default=["auto"], metavar="MODE",
                     help="auto (both AE, default) | fixed INTEGRATION ANALOG_GAIN DIGITAL_GAIN (register values, "
                          "both boards) | sync (left AE, the right board takes the left's values for the next pair)")
@@ -398,7 +415,7 @@ def main():
         image_format = (protocol.FORMAT_JPEG, int(fmt[5:]))
     else:
         ap.error("--format raw | png | jpeg:QUALITY")
-    st = Stereo(log, boards, args.bridge, args.interval_ms, exposure, image_format)
+    st = Stereo(log, boards, args.bridge, args.interval_ms, exposure, image_format, not args.no_sync)
     h = args.height
     canvas = np.zeros((h, h * 3 // 2, 3), np.uint8)
     shown: Optional[tuple[Pair, dict[str, np.ndarray]]] = None  # pair on screen, its rotated pictures

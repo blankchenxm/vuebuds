@@ -7,6 +7,8 @@ Frames (little endian):
       'C'  [interval u16, 1.25 ms units][n][n x (addr type u8, address 6 B LSB first)]
       'W'  [slot mask][bytes]  write to the control characteristic (0xB1 stream, 0xB2 picture)
       'X'  [slot mask]         disconnect (the boards reboot; the bridge reconnects)
+      'T'  [slot mask][delay ms u16][command]  timed command: T = newest anchor point + delay on
+                               the bridge's clock, the same T for all boards (0xB7 = picture at T)
   bridge -> PC  [A5 5A][type][slot][len u16][payload]
       'N'  one data notification ([seq, flags, ...], protocol.FrameAssembler)
       'E'  link event (central_event_t in fw_bridge/src/central.h)
@@ -120,6 +122,10 @@ class Bridge:
 
     def write(self, mask: int, data: bytes):
         self._send("W", bytes([mask]) + data)
+
+    def timed_write(self, mask: int, command: int, delay_ms: int = 80):
+        """Time sync (plan E): the boards act at one bridge time T, delay_ms after the newest anchor."""
+        self._send("T", struct.pack("<BHB", mask, delay_ms, command))
 
     def disconnect(self, mask: int):
         self._send("X", bytes([mask]))

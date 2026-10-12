@@ -2,6 +2,7 @@
 #define SNAPSHOT_H_
 
 #include <stdbool.h>
+#include <stdint.h>
 
 /*
  * Take one picture (control command 0xB2, stream builds only). The first request
@@ -18,6 +19,9 @@
  */
 
 void snapshotRequest(void);    // EVENT_CAMERA_SNAPSHOT
+/* 0xB7 (timesync.h): the HM0360 wakes at this local time in hardware (plan E1); asleep sensor
+ * only, otherwise (first picture, fixed exposure, still falling asleep) as snapshotRequest. */
+void snapshotRequestAt(uint64_t local_us);
 void snapshotFrameDone(void);  // EVENT_CAMERA_CAPTURE_DONE: sleep the sensor, send the frame
 void snapshotAsleep(void);     // EVENT_CAMERA_ASLEEP: XSLEEP went low on the frame boundary, stop MCLK
 bool snapshotActive(void);     // a picture has been requested since boot

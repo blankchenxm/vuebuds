@@ -18,6 +18,7 @@
 #include "snapshot.h"
 #include "ble.h"
 #include "image.h"
+#include "timesync.h"
 #include "i2c.h"
 #include "timers.h"
 
@@ -115,6 +116,20 @@ static void processEvent(event_t event)
     case EVENT_BLE_COMMAND: {
       ble_command_t cmd;
       while (bleNextCommand(&cmd)) {
+        if (cmd.data[0] == TIMESYNC_CMD_REFERENCE || cmd.data[0] == TIMESYNC_CMD_SNAPSHOT_AT) {
+          uint64_t at;
+          bool timed = timesyncCommand(&cmd, &at);
+#ifndef CAMERA_APP_MONITOR
+          if (cmd.data[0] == TIMESYNC_CMD_SNAPSHOT_AT && !streaming) {
+            if (timed) {
+              snapshotRequestAt(at);
+            } else {
+              snapshotRequest();  // no time reference yet: now, like 0xB2
+            }
+          }
+#endif
+          continue;
+        }
         imageCommand(&cmd);
 #ifndef CAMERA_APP_MONITOR
         if (cmd.data[0] == IMAGE_CMD_SET_EXPOSURE) {

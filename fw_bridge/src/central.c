@@ -20,6 +20,8 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/hci.h>
+#include <zephyr/sys/byteorder.h>
+#include <bluetooth/hci_vs_sdc.h>
 
 #include "central.h"
 #include "usb.h"
@@ -44,14 +46,23 @@ typedef struct {
   struct bt_gatt_exchange_params mtu;
   struct k_work setup;  // PHY, data length, MTU, discovery: off the BT RX thread
   uint32_t packets, bytes;  // notifications since the last stats line
+  // Latest connection anchor point on the bridge's controller clock (time sync, plan E).
+  bool anchorValid;
+  uint64_t anchorUs;
+  uint16_t anchorCounter;
 } slot_t;
 
 static slot_t slots[CENTRAL_SLOTS];
 static uint16_t interval = 12;  // 15 ms until the PC configures it
 static bool connecting;
 static K_MUTEX_DEFINE(lock);
+static struct k_spinlock anchorLock;
+
+#define CMD_TIME_REFERENCE 0xB5  // fw_nrf5340/src/timesync.h
+#define REFERENCE_PERIOD_S 5
 
 static void connectNext(struct k_work *work);
+static void scheduleReference(void);
 static K_WORK_DELAYABLE_DEFINE(connectWork, connectNext);
 
 static void text(int slot, const char *fmt, ...)
@@ -133,6 +144,7 @@ static void subscribe(int i)
   // Notifications are on once the CCC write is sent; the board starts nothing until a command.
   s->ready = true;
   text(i, "ready: data 0x%04x, control 0x%04x", s->dataHandle, s->controlHandle);
+  scheduleReference();
   sendEvent(i, CENTRAL_READY, 0);
 }
 
@@ -170,6 +182,72 @@ static void onMtu(struct bt_conn *conn, uint8_t err, struct bt_gatt_exchange_par
   if (e) {
     text(i, "discovery failed (%d)", e);
   }
+}
+
+/* ---- time sync (plan E, as nrf/samples/bluetooth/conn_time_sync) ---- */
+
+/* Controller anchor point reports: one per connection event and link. */
+static bool onVendorEvent(struct net_buf_simple *buf)
+{
+  uint8_t *code = net_buf_simple_pull_mem(buf, sizeof(*code));
+  if (*code != SDC_HCI_SUBEVENT_VS_CONN_ANCHOR_POINT_UPDATE_REPORT) {
+    return false;
+  }
+  const sdc_hci_subevent_vs_conn_anchor_point_update_report_t *evt = (const void *)buf->data;
+  struct bt_conn *conn = bt_hci_conn_lookup_handle(evt->conn_handle);
+  if (conn == NULL) {
+    return true;
+  }
+  int i = slotOf(conn);
+  bt_conn_unref(conn);
+  if (i >= 0) {
+    k_spinlock_key_t key = k_spin_lock(&anchorLock);
+    slots[i].anchorValid = true;
+    slots[i].anchorUs = evt->anchor_point_us;
+    slots[i].anchorCounter = evt->event_counter;
+    k_spin_unlock(&anchorLock, key);
+  }
+  return true;
+}
+
+/* [cmd][anchor us u64][event counter u16] (+ [T u64] for timed commands) */
+static int writeTimed(int i, uint8_t cmd, const uint64_t *t_us)
+{
+  slot_t *s = &slots[i];
+  uint8_t msg[19];
+  k_spinlock_key_t key = k_spin_lock(&anchorLock);
+  bool valid = s->anchorValid;
+  msg[0] = cmd;
+  sys_put_le64(s->anchorUs, &msg[1]);
+  sys_put_le16(s->anchorCounter, &msg[9]);
+  k_spin_unlock(&anchorLock, key);
+  if (!valid || !s->ready || !s->conn) {
+    return -EAGAIN;
+  }
+  size_t len = 11;
+  if (t_us) {
+    sys_put_le64(*t_us, &msg[11]);
+    len = 19;
+  }
+  return bt_gatt_write_without_response(s->conn, s->controlHandle, msg, len, false);
+}
+
+/* References keep the boards' mapping fresh (event counters wrap after 65536 events). */
+static void sendReferences(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(referenceWork, sendReferences);
+static void sendReferences(struct k_work *work)
+{
+  for (int i = 0; i < CENTRAL_SLOTS; i++) {
+    if (slots[i].ready) {
+      writeTimed(i, CMD_TIME_REFERENCE, NULL);
+    }
+  }
+  k_work_reschedule(&referenceWork, K_SECONDS(REFERENCE_PERIOD_S));
+}
+
+static void scheduleReference(void)
+{
+  k_work_reschedule(&referenceWork, K_MSEC(200));  // after a couple of anchor reports
 }
 
 /* ---- connection management ---- */
@@ -357,6 +435,10 @@ void centralInit(void)
   }
   int err = bt_enable(NULL);
   printk("[bridge] Bluetooth %s (%d)\n", err ? "failed" : "on", err);
+  bt_hci_register_vnd_evt_cb(onVendorEvent);
+  sdc_hci_cmd_vs_conn_anchor_point_update_event_report_enable_t enable = {.enable = true};
+  err = hci_vs_sdc_conn_anchor_point_update_event_report_enable(&enable);
+  printk("[bridge] anchor point reports %s (%d)\n", err ? "failed" : "on", err);
   k_work_reschedule(&statsWork, K_SECONDS(1));
 }
 
@@ -407,6 +489,27 @@ void centralWrite(uint8_t mask, const uint8_t *data, uint16_t len)
     }
     usbSendFrame(FRAME_WRITE, i, &err, 1);
   }
+}
+
+void centralTimedWrite(uint8_t mask, uint16_t delay_ms, uint8_t cmd)
+{
+  // One bridge time T for every link: the newest anchor point plus the delay.
+  uint64_t base = 0;
+  k_spinlock_key_t key = k_spin_lock(&anchorLock);
+  for (int i = 0; i < CENTRAL_SLOTS; i++) {
+    if ((mask & BIT(i)) && slots[i].anchorValid) {
+      base = MAX(base, slots[i].anchorUs);
+    }
+  }
+  k_spin_unlock(&anchorLock, key);
+  uint64_t t_us = base + (uint64_t)delay_ms * 1000;
+  for (int i = 0; i < CENTRAL_SLOTS; i++) {
+    if (mask & BIT(i)) {
+      int8_t err = base ? writeTimed(i, cmd, &t_us) : -EAGAIN;
+      usbSendFrame(FRAME_WRITE, i, &err, 1);
+    }
+  }
+  text(-1, "timed 0x%02x at %u.%03u ms (bridge clock)", cmd, (uint32_t)(t_us / 1000), (uint32_t)(t_us % 1000));
 }
 
 void centralDisconnect(uint8_t mask)

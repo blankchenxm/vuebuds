@@ -43,6 +43,8 @@ CMD_SNAPSHOT = 0xB2
 CMD_SET_FORMAT = 0xB3
 CMD_CODEC_BENCH = 0xB4  # next picture sent raw, PNG, JPEG q95 / 90 / 85 / 75 / 60 (same frame id)
 CMD_SET_EXPOSURE = 0xB6
+CMD_TIME_REFERENCE = 0xB5   # from the bridge only (fw_nrf5340/src/timesync.h)
+CMD_SNAPSHOT_AT = 0xB7      # picture at a bridge time T (bridge.Bridge.timed_write)
 FORMAT_RAW, FORMAT_PNG, FORMAT_JPEG = 0, 1, 2
 FORMAT_NAMES = {FORMAT_RAW: "raw", FORMAT_PNG: "png", FORMAT_JPEG: "jpeg"}
 
