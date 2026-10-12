@@ -5,6 +5,11 @@ on both (control command 0xB2) at the same time, rotate each and show them side 
   python stereo.py --flash VGA              # first flash VGA (or QVGA / QQVGA) to both boards
   python stereo.py --auto 5 --interval 3    # take and save 5 pairs without the keyboard, then quit
   python stereo.py --rotate-left 180        # override a board's rotation (degrees clockwise)
+  python stereo.py --exposure sync          # left board AE, the right board copies its exposure
+  python stereo.py --exposure fixed 200 0 0x100   # both boards the same fixed exposure (registers)
+  python stereo.py --format jpeg:85         # the boards send JPEG q85 (encoded on the board; or png)
+  python stereo.py --bridge                 # through the BLE-USB bridge (fw_bridge/) instead of
+                                            # Windows Bluetooth; both 0xB2 go out in one bridge command
 
 S saves the pair on screen to captures/stereo/<time>/: left.png, right.png (rotated, native
 resolution) and info.json (timings). Stitch saved pairs offline with stitch.py.
@@ -85,6 +90,40 @@ class BoardLink:
         return time.monotonic()
 
 
+class BridgeBoardLink:
+    """One board behind the BLE-USB bridge (slot 0 = left, 1 = right); the bridge reconnects."""
+
+    def __init__(self, side: str, slot: int, board: str, log: SessionLog,
+                 on_frame: Callable[[str, protocol.Frame], None]):
+        self.side = side
+        self.slot = slot
+        self.board = board
+        self.address = protocol.BOARDS[board]["address"]
+        self.log = log
+        self.link = None  # bridge.Link (updated in place by the bridge reader)
+        self._ready = False
+        self.fresh = False
+        self.assembler = protocol.FrameAssembler(lambda f: on_frame(side, f), lambda m: log(side, m))
+
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
+    @property
+    def status(self) -> str:
+        if self.link is None:
+            return "connecting"
+        return "ready" if self.link.ready else ("connected" if self.link.connected else "reconnecting")
+
+    def on_event(self, link):
+        was_ready, self._ready = self._ready, link.ready
+        self.link = link
+        if link.ready and not was_ready:
+            self.fresh = True  # the board rebooted: the next picture includes the camera init
+            self.log(self.side, f"ready via bridge: {self.board} {link.address}, interval {link.interval_ms:g} ms, "
+                                f"PHY {link.phy}, data length {link.data_length}, MTU {link.mtu}")
+
+
 class Pair:
     def __init__(self, index: int, warmup: bool):
         self.index = index
@@ -97,9 +136,25 @@ class Pair:
 class Stereo:
     """Owns both connections on one asyncio loop (background thread)."""
 
-    def __init__(self, log: SessionLog, boards: dict[str, str]):
+    def __init__(self, log: SessionLog, boards: dict[str, str], bridge_port: Optional[str] = None,
+                 interval_ms: float = 15.0, exposure: tuple = ("auto",), image_format: tuple = (0, 0)):
         self.log = log
-        self.links = {side: BoardLink(side, boards[side], log, self._on_frame) for side in SIDES}
+        self.exposure = exposure
+        self.image_format = image_format  # (protocol.FORMAT_*, quality)
+        self.bridge = None
+        if bridge_port is not None:
+            import bridge
+            self.links = {side: BridgeBoardLink(side, i, boards[side], log, self._on_frame) for i, side in enumerate(SIDES)}
+            by_slot = list(self.links.values())
+            self.bridge = bridge.Bridge(
+                bridge_port or None,
+                on_notify=lambda slot, d: by_slot[slot].assembler.feed(d),
+                on_text=lambda slot, t: log(by_slot[slot].side if slot < 2 else "bridge", f"bridge: {t}"),
+                on_event=lambda slot, l: by_slot[slot].on_event(l))
+            self.bridge.configure([l.address for l in by_slot], interval_ms)
+            log("host", f"bridge on {self.bridge.port}, interval {interval_ms:g} ms")
+        else:
+            self.links = {side: BoardLink(side, boards[side], log, self._on_frame) for side in SIDES}
         self.pending: Optional[Pair] = None
         self.done: collections.deque[Pair] = collections.deque()
         self.pairs = 0
@@ -107,7 +162,8 @@ class Stereo:
         self._stop = threading.Event()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
+        if self.bridge is None:
+            self._thread.start()
 
     def _run(self):
         asyncio.set_event_loop(self._loop)
@@ -130,6 +186,39 @@ class Stereo:
     def status(self) -> str:
         return " | ".join(f"{s}: {l.status}" for s, l in self.links.items())
 
+    def send(self, sides, data: bytes):
+        """Write a control command to these sides (one bridge command for both)."""
+        if self.bridge is not None:
+            self.bridge.write(sum(1 << self.links[s].slot for s in sides), data)
+            return
+        for s in sides:
+            client = self.links[s].client
+            if client is not None:
+                asyncio.run_coroutine_threadsafe(
+                    client.write_gatt_char(protocol.CONTROL_UUID, data, response=False), self._loop)
+
+    def apply_exposure(self):
+        """--format, then --exposure: auto (both AE), fixed (both the same values), sync (left AE, right follows)."""
+        self.send(SIDES, protocol.set_format_command(*self.image_format))
+        mode = self.exposure[0]
+        if mode == "fixed":
+            self.send(SIDES, protocol.set_exposure_command(*self.exposure[1:]))
+        else:
+            self.send(SIDES, protocol.set_exposure_command(None))
+        self.log("host", f"exposure: {' '.join(str(x) for x in self.exposure)}")
+
+    def _sync_exposure(self, left: protocol.Frame):
+        # The right board takes the left board's last AE result for the next pair.
+        if left.integration is not None:
+            self.send(["right"], protocol.set_exposure_command(left.integration, left.analog_gain, left.digital_gain))
+
+    def _trigger_bridge(self, pair: Pair):
+        # One bridge command: the bridge writes 0xB2 to both links back to back.
+        self.bridge.write(0b11, bytes([protocol.CMD_SNAPSHOT]))
+        t = time.monotonic()
+        pair.t_written = {"left": t, "right": t}
+        self.log("host", f"pair {pair.index}{' (warm-up)' if pair.warmup else ''}: 0xB2 sent to the bridge")
+
     def trigger(self, warmup: bool = False) -> bool:
         with self._lock:
             if self.pending is not None or not self.ready:
@@ -138,7 +227,10 @@ class Stereo:
             self.pending = Pair(self.pairs, warmup)
             for l in self.links.values():
                 l.fresh = False
-        asyncio.run_coroutine_threadsafe(self._trigger(self.pending), self._loop)
+        if self.bridge is not None:
+            self._trigger_bridge(self.pending)
+        else:
+            asyncio.run_coroutine_threadsafe(self._trigger(self.pending), self._loop)
         return True
 
     async def _trigger(self, pair: Pair):
@@ -162,11 +254,15 @@ class Stereo:
                 self.log(side, f"frame #{frame.index} without a request, ignored")
                 return
             pair.frames[side] = frame
+            exp = (f", exposure {frame.integration}/{frame.analog_gain:#04x}/{frame.digital_gain:#06x}"
+                   if frame.integration is not None else "")
             self.log(side, f"pair {pair.index}: {frame.width}x{frame.height} lost={frame.lost_packets} "
-                           f"rx {frame.duration_s:.2f}s, +{(frame.completed_at - pair.t_request):.2f}s after request")
+                           f"rx {frame.duration_s:.2f}s, +{(frame.completed_at - pair.t_request):.2f}s after request{exp}")
             if len(pair.frames) == 2:
                 self.done.append(pair)
                 self.pending = None
+                if self.exposure[0] == "sync":
+                    self._sync_exposure(pair.frames["left"])
 
     def check_timeout(self):
         with self._lock:
@@ -177,7 +273,10 @@ class Stereo:
 
     def close(self):
         self._stop.set()
-        self._thread.join(timeout=5)
+        if self.bridge is not None:
+            self.bridge.close()
+        else:
+            self._thread.join(timeout=5)
 
 
 def to_image(frame: protocol.Frame, rotate: int) -> np.ndarray:
@@ -217,6 +316,13 @@ def save_pair(pair: Pair, images: dict[str, np.ndarray], rotations: dict[str, in
         "write_done_ms": {s: round((written[s] - pair.t_request) * 1000, 1) for s in written},
         "frame_done_s": {s: round(pair.frames[s].completed_at - pair.t_request, 3) for s in SIDES},
         "lost_packets": {s: pair.frames[s].lost_packets for s in SIDES},
+        # Frame header v2 (fw_nrf5340): board clock unless "common_clock" (time sync)
+        "frame_id": {s: pair.frames[s].frame_id for s in SIDES},
+        "capture_us": {s: pair.frames[s].capture_us for s in SIDES},
+        "common_clock": {s: bool(pair.frames[s].header_flags & protocol.HEADER_COMMON_CLOCK) for s in SIDES},
+        "exposure": {s: pair.frames[s].exposure for s in SIDES},
+        "format": {s: protocol.FORMAT_NAMES.get(pair.frames[s].format, pair.frames[s].format) for s in SIDES},
+        "bytes": {s: len(pair.frames[s].data) for s in SIDES},
     }
     (out / "info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
     return out
@@ -251,6 +357,14 @@ def main():
     ap.add_argument("--rotate-right", type=int, choices=sorted(ROTATIONS), help="degrees clockwise (default: BOARDS)")
     ap.add_argument("--flash", choices=["QQVGA", "QVGA", "VGA"],
                     help="first build and flash this mode to both boards (the mode is compile-time)")
+    ap.add_argument("--bridge", nargs="?", const="", default=None, metavar="PORT",
+                    help="use the BLE-USB bridge (COM port, default: found by USB VID)")
+    ap.add_argument("--interval-ms", type=float, default=15.0, help="with --bridge: connection interval")
+    ap.add_argument("--exposure", nargs="+", default=["auto"], metavar="MODE",
+                    help="auto (both AE, default) | fixed INTEGRATION ANALOG_GAIN DIGITAL_GAIN (register values, "
+                         "both boards) | sync (left AE, the right board takes the left's values for the next pair)")
+    ap.add_argument("--format", default="raw", metavar="FMT",
+                    help="image format the boards send: raw (default) | png | jpeg:QUALITY (1-100), encoded on the board")
     ap.add_argument("--height", type=int, default=640, help="display height of each picture (pixels)")
     ap.add_argument("--auto", type=int, default=0, help="take and save N pairs automatically, then quit")
     ap.add_argument("--interval", type=float, default=2.0, help="with --auto: seconds between pairs")
@@ -268,7 +382,23 @@ def main():
     if args.flash and not flash_boards(args.flash, boards, log):
         log.close()
         return 1
-    st = Stereo(log, boards)
+    exposure = tuple(args.exposure)
+    if exposure[0] == "fixed":
+        if len(exposure) != 4:
+            ap.error("--exposure fixed INTEGRATION ANALOG_GAIN DIGITAL_GAIN")
+        exposure = ("fixed",) + tuple(int(x, 0) for x in exposure[1:])
+    elif exposure[0] not in ("auto", "sync") or len(exposure) != 1:
+        ap.error("--exposure auto | fixed I A D | sync")
+    fmt = args.format.lower()
+    if fmt == "raw":
+        image_format = (protocol.FORMAT_RAW, 0)
+    elif fmt == "png":
+        image_format = (protocol.FORMAT_PNG, 0)
+    elif fmt.startswith("jpeg:") and fmt[5:].isdigit() and 1 <= int(fmt[5:]) <= 100:
+        image_format = (protocol.FORMAT_JPEG, int(fmt[5:]))
+    else:
+        ap.error("--format raw | png | jpeg:QUALITY")
+    st = Stereo(log, boards, args.bridge, args.interval_ms, exposure, image_format)
     h = args.height
     canvas = np.zeros((h, h * 3 // 2, 3), np.uint8)
     shown: Optional[tuple[Pair, dict[str, np.ndarray]]] = None  # pair on screen, its rotated pictures
@@ -306,6 +436,7 @@ def main():
                         save_shown()
                 next_auto = time.monotonic() + args.interval
             if st.ready and st.pending is None and st.needs_warmup:
+                st.apply_exposure()  # the boards rebooted: they start in auto
                 if st.trigger(warmup=True):
                     log("host", "both boards connected: warm-up pair (includes the camera init, not saved)")
                     message = "both boards connected: warm-up pair..."

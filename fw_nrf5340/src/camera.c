@@ -16,6 +16,7 @@
 #include "camera.h"
 #include "pins.h"
 #include "timers.h"
+#include "i2c.h"
 
 // Mode and test pattern are compile-time choices (no runtime switching).
 #ifndef CAMERA_MODE
@@ -46,6 +47,8 @@
 #define CAMERA_SLEEP_AFTER_FRAME_TIMEOUT_MS 16
 #define CAMERA_SLEEP_ANYTIME_TIMEOUT_MS 250
 #endif
+
+static void applyPendingExposure(void);  // set before the sensor started (cameraSetExposure)
 
 static bool cameraInitialized = false;
 static const camera_sensor_t *sensor = NULL;
@@ -116,6 +119,7 @@ void cameraStartStream(void)
   capture_mclk_enable(true);
   capture_arm();
   sensor->stream_start();
+  applyPendingExposure();
   NRF_LOG_RAW_INFO("%08d [cam] stream started\n", systemTimeGetMs());
 }
 
@@ -170,6 +174,7 @@ void cameraSensorStream(void)
   }
   capture_mclk_enable(true);
   sensor->stream_start();
+  applyPendingExposure();
 }
 
 // HM0360 S2: MCLK runs whenever XSLEEP is high (datasheet: MCLK first, then XSLEEP).
@@ -189,6 +194,93 @@ static void sleepTimeout(struct k_timer *timer)
 }
 K_TIMER_DEFINE(sleepTimeoutTimer, sleepTimeout, NULL);
 
+// Exposure: AE (the HM0360 table's AE_CTRL 0x1F) or fixed values with AE off (as OpenMV's
+// set_auto_exposure: AE_CTRL bit0 off, then integration / gains, then COMMAND_UPDATE).
+// Fixed values only hold while the sensor keeps streaming: waking from S2 meters the scene
+// itself and the first frames ignore the registers (10-11: registers read back the fixed values,
+// the picture stayed at the AE target; pre-meter off, Context A AE_CTRL, AE update off, writing
+// 40 ms after the wake and skipping a frame changed nothing). snapshot.c therefore keeps the
+// sensor awake while the exposure is manual.
+#define HM0360_AE_CTRL 0x2000
+#define HM0360_AE_CTRL_AUTO 0x1F    // hm0360_modes.c
+#define HM0360_AE_CTRL_MANUAL 0x1E  // bit0 = AE enable (datasheet 10.13)
+#define SENSOR_COMMAND_UPDATE 0x0104
+static bool exposureManual;
+static bool exposurePending;  // set while asleep: written right after the next wake
+static camera_exposure_t exposureValues;
+
+static bool sensorAwake(void)
+{
+  return cameraInitialized && sensor != NULL && sleepState == CAMERA_AWAKE && capture_mclk_running();
+}
+
+static void writeExposure(void)
+{
+  if (exposureManual) {
+    i2cWrite16(CAMERA_I2C_ADDR, HM0360_AE_CTRL, HM0360_AE_CTRL_MANUAL);
+    i2cWrite16(CAMERA_I2C_ADDR, 0x0202, exposureValues.integration >> 8);
+    i2cWrite16(CAMERA_I2C_ADDR, 0x0203, exposureValues.integration & 0xFF);
+    i2cWrite16(CAMERA_I2C_ADDR, 0x0205, exposureValues.analog_gain);
+    i2cWrite16(CAMERA_I2C_ADDR, 0x020E, exposureValues.digital_gain >> 8);
+    i2cWrite16(CAMERA_I2C_ADDR, 0x020F, exposureValues.digital_gain & 0xFF);
+  } else {
+    i2cWrite16(CAMERA_I2C_ADDR, HM0360_AE_CTRL, HM0360_AE_CTRL_AUTO);
+  }
+  // Latch the double-buffered registers; write-only, so no read-back check.
+  i2cWrite16NoVerify(CAMERA_I2C_ADDR, SENSOR_COMMAND_UPDATE, 0x01);
+  exposurePending = false;
+}
+
+bool cameraReadExposure(camera_exposure_t *exposure)
+{
+  if (!sensorAwake()) {
+    return false;
+  }
+  exposure->integration = (i2cRead16(CAMERA_I2C_ADDR, 0x0202) << 8) | i2cRead16(CAMERA_I2C_ADDR, 0x0203);
+  exposure->analog_gain = i2cRead16(CAMERA_I2C_ADDR, 0x0205);
+  exposure->digital_gain = (i2cRead16(CAMERA_I2C_ADDR, 0x020E) << 8) | i2cRead16(CAMERA_I2C_ADDR, 0x020F);
+  return true;
+}
+
+void cameraSetExposure(const camera_exposure_t *exposure)
+{
+  if (sensor != NULL && sensor->model_id != 0x0360) {
+    NRF_LOG_RAW_INFO("[cam] manual exposure is HM0360 only\n");
+    return;
+  }
+  exposureManual = exposure != NULL;
+  if (exposure != NULL) {
+    exposureValues = *exposure;
+  }
+  exposurePending = true;
+  if (sensorAwake()) {
+    writeExposure();
+  }
+  NRF_LOG_RAW_INFO("%08d [cam] exposure %s: integration %u, analog gain 0x%02x, digital gain 0x%04x%s\n",
+                   systemTimeGetMs(), exposureManual ? "manual" : "auto", exposureValues.integration,
+                   exposureValues.analog_gain, exposureValues.digital_gain,
+                   exposurePending ? " (after the next wake)" : "");
+}
+
+static void applyPendingExposure(void)
+{
+  if (exposurePending && sensorAwake()) {
+    writeExposure();
+  }
+}
+
+bool cameraExposureManual(void)
+{
+  return exposureManual;
+}
+
+void cameraReapplyExposure(void)
+{
+  if (exposureManual && sensorAwake()) {
+    writeExposure();
+  }
+}
+
 void cameraWake(void)
 {
   k_timer_stop(&sleepTimeoutTimer);
@@ -196,6 +288,10 @@ void cameraWake(void)
   nrf_delay_us(CAMERA_XSLEEP_SETTLE_US);
   capture_xsleep(true);
   sleepState = CAMERA_AWAKE;
+  if (exposurePending) {
+    nrf_delay_us(CAMERA_XSLEEP_SETTLE_US);  // >= 10 us from XSLEEP high to I2C
+    writeExposure();
+  }
 }
 
 void cameraSleepOnFrameBoundary(void)

@@ -5,6 +5,76 @@
 
 ---
 
+## 2026-10-11 · 板上压缩(JPEG / PNG)+ PSRAM 驱动 + 压缩测试命令(PR #44,Issue #43)
+
+- **阶段**:硬件优化计划阶段 3(压缩)+ PSRAM P2(驱动,用作编码输出)
+- **改了什么**:
+  - `fw_nrf5340/lib/`(新):bitbank2 **JPEGENC**、**PNGenc**(Apache-2.0,原样复制,来源和 commit 见 `lib/README.md`)。JPEGENC 只有 4 档固定质量 → **补丁** `JPEGEQuant()`:0–3 保持原样,`JPEGE_Q_IJG + q` 按 libjpeg 公式缩放量化表(q95 / 90 / 85 / 75 / 60 和 OpenCV 同义)。PNGenc 的 C 原型有两处错,在 `codec_png.c` 里用宏绕开(库文件不改)。
+  - `src/codec.c`、`codec_jpeg.c`、`codec_png.c`(新):8 位灰度 JPEG(4:4:4)/ PNG(zlib 级别 6,4 KB 窗口)编码,输出走 `codec_io_t`(PNG 结束时要回读、跳转)。编码器状态约 50 KB,**放在帧池槽 0 之后**,不占 .bss(Monitor 的槽数不变)。编码器文件用 `-O2`。
+  - `src/psram.c`(新):APS6404L 驱动(SPIM4 8 MHz、强驱动、1 KB 页内突发、命令和数据两段传输不复制)。
+  - `src/image.c`:非原始格式先编码到 PSRAM(没有 PSRAM 时到帧池剩余 RAM),再从那里发 BLE;编码失败就发原始图。`B3` 现在接受 PNG / JPEG;**`B4` 压缩测试**:下一张同一帧依次发 原始、PNG、JPEG q95 / 90 / 85 / 75 / 60(帧号相同),RTT 打印每种的大小和编码耗时。
+  - `src/capture/frame_pool.c`:`frame_pool_after(n)`(前 n 个槽之后的内存)。
+  - `src/main.c`:`-Cflags CPU_128MHZ` 实验选项(应用核默认 64 MHz)。
+  - `tools/codec_test/`(新):同一份编码器源码用 MinGW gcc 在电脑上编译,和 OpenCV 比体积 / PSNR / PNG 是否无损。
+  - `host/codec_bench.py`(新):经桥发 `B4`,统计体积、PSNR、BLE 时间、板上编码时间(RTT 不复位挂上),文件存 `captures/codec/`,结果追加 `logs/codec_bench.csv`。`host/stereo.py --format raw|png|jpeg:Q`。
+- **为什么**:传输是瓶颈;压缩必须在板上、发送前做。用户 10-10 要求 PNG 和 JPEG q95 / 90 / 85 / 75 / 60 都在板上实现、运行时用命令选。
+- **和原代码的行为差异**:默认格式仍是原始图(行为不变),只有发了 `B3` / `B4` 才压缩。新命令 `B4`。
+- **验证**:
+  - 电脑端(实拍 VGA 480×640):固件编码器和 OpenCV 体积差 ≤ 2%、PSNR 差 ≤ 0.4 dB(q85:19.5 对 19.7 KB,47.4 对 47.5 dB);PNG 解码后和原图逐字节一致。
+  - 板上 QVGA(HM0360 板,2 轮):原始 75 KB / BLE 0.75 s;PNG 32.7 KB,编码 654 ms;JPEG q95 12.8 KB / 47.3 dB / 84 ms,q85 5.7 KB / 45.3 dB / 65 ms,q60 3.2 KB / 43.0 dB / 60 ms。
+  - 板上 VGA,**两块板同时经桥**(3 轮):原始 300 KB / BLE 5.1 s;PNG 96 KB,编码 4.8–5.0 s;JPEG q95 30–32 KB / 50.8 dB / 编码 0.38 s + BLE 0.61 s;**q85 11 KB / 49.1 dB / 0.32 s + 0.28 s**;q60 5–7 KB / 47.2 dB / 0.31 s + 0.09 s。
+  - `-O2`:JPEG 321 → 313 ms,PNG 4.9 → 4.2 s。**128 MHz**(`CPU_128MHZ`):JPEG q85 313 → 161 ms,PNG 4.2 → 2.2 s,无坏帧。
+  - 两块板都检测到 PSRAM(`ID 0d 5d`),输出在 PSRAM。
+- **遗留 / 下一步**:是否默认 128 MHz(功耗,待用户决定);PNG 在板上太慢(VGA 2–5 s),预计最终用 JPEG;把收到的图送 VLM 比 OCR(`host/vlm_eval.py` 在另一个分支)。
+
+## 2026-10-11 · 帧头 v2 + 每帧曝光记录 + 手动 / 同步曝光(PR #42,Issue #41)
+
+- **阶段**:硬件优化计划阶段 2(帧头 v2)+ 阶段 5 的 X1 / X2 / X3(曝光)
+- **改了什么**:
+  - `fw_nrf5340/src/ble.h/.c`:**帧头 v2**(用户 10-10 同意):帧开始包 flags bit1 = v2,负载开头是 22 字节 `ble_frame_header_t`:宽、高、格式、质量、数据长度、拍摄时间(本帧 FVLD 上升沿,µs,板子本地时钟)、帧号、积分时间、模拟增益、数字增益、标志(共同时钟 / 手动曝光)。发送改成 `bleSendImage(header, reader)`(按偏移读数据,以后压缩 / PSRAM 共用)。控制特征接受多字节命令,进队列交给主线程(`EVENT_BLE_COMMAND`)。
+  - `fw_nrf5340/src/image.c/.h`(新):组帧头、读曝光、发送;命令 `B3 <格式> <质量>`(现在只接受原始格式,PNG / JPEG 在下一阶段)、`B6 00` 自动曝光 / `B6 01 <积分 u16> <模拟增益> <数字增益 u16>` 固定曝光。
+  - `fw_nrf5340/src/camera.c/.h`:`cameraReadExposure` / `cameraSetExposure`(AE_CTRL bit0 关 + 写积分 / 增益 + COMMAND_UPDATE,和 OpenMV 一样);睡着时记下来,唤醒后写。
+  - `fw_nrf5340/src/snapshot.c`:曝光在帧采完、进 S2 之前读(S2 时 I2C 不应答);**固定曝光期间传感器不进 S2,一直出帧**,拍照取下一帧;切到固定曝光时立刻唤醒,300 ms 后再写一次。
+  - `fw_nrf5340/src/capture`:统计里加 `start_us`(本帧 FVLD 上升沿时间)。
+  - `host/protocol.py`:同时解析 v1 / v2;`Frame` 加格式、拍摄时间、帧号、曝光;PNG / JPEG 用 OpenCV 解码成灰度;`set_format_command` / `set_exposure_command`。
+  - `host/stereo.py`:`info.json` 记录帧号、拍摄时间、曝光、格式、字节数;`--exposure auto | fixed I A D | sync`(sync:左板自动,每拍完一对把左板这一帧的曝光值设给右板,用于下一对)。
+- **为什么**:压缩、对时、曝光都要在帧里带信息,一次定好协议;曝光是左右一致的前提。
+- **和原代码的行为差异**:帧开始包格式变了(v2,电脑端兼容 v1);新命令 0xB3 / 0xB6。默认(自动曝光)拍照、推流、Monitor 行为不变;**固定曝光时拍照不再在两张之间进 S2**(新功能,手动期间多耗电)。
+- **验证**(两块 5340 + HM0360,经桥,QVGA):
+  - 帧头字段正确:帧号连续,拍摄时间 = 板子本地时间,曝光值和寄存器一致;推流 / 拍照 / `ble_bench` / `stereo.py` 照常,0 丢包。
+  - 推流时固定曝光:积分 272 → 100 → 30 行,平均亮度 125 → 46 → 18,切回自动恢复 125(改设置那一帧,帧头已是新值、像素还是旧曝光)。
+  - **拍照(S2)时固定曝光一开始完全不起作用**:寄存器读回是固定值,画面却始终在 AE 目标亮度(约 125)。试过:关掉唤醒时预测光(0x3026 bit1 / 全关)、写 Context A 的 AE_CTRL(0x3512)、关 AE 更新位(bit4)、唤醒后 40 ms 再写、跳过唤醒后第一帧、COMMAND_UPDATE 先写 0,都没用 → 结论:HM0360 从 S2 唤醒时自己测光定曝光,不看寄存器。改成固定曝光时不进 S2 后:两块板积分 200 / 100 时亮度 74–85 / 44–51,两轮一致。
+  - `stereo.py --exposure fixed 150 0 0x100`:两块板每一对都是 150 / 0 / 0x100;`--exposure sync`:右板每对用左板上一对的值(光线变化时晚一对)。
+- **遗留 / 下一步**:X4(长时间睡眠后、睡眠中开关灯时第一帧的曝光)要用户配合开关灯;压缩格式(阶段 3)。
+
+## 2026-10-11 · BLE-USB 桥 fw_bridge(52840 DK 当中心设备)+ 新硬件自检(PR #40,Issue #39)
+
+- **阶段**:硬件优化计划阶段 1(Obsidian `02-daily_raw/10.5~10.11/项目硬件优化进程.md`)
+- **改了什么**:
+  - `fw_bridge/`(新,NCS v3.2.1):52840 DK(SN `1050221517`,原 HM01B0 板,`fw/` 和 SoftDevice 已擦)当 BLE 中心设备,同时连两块 5340 相机板,通知经 USB CDC ACM(DK 侧面 nRF USB 口)转给电脑。`src/central.c`:按电脑给的地址一块一块连、掉线自动重连;连接间隔由电脑定(默认 15 ms),**拒绝相机板自己的参数请求**;2M PHY、数据长度 251、MTU 由相机板决定(桥支持到 498);连上后的 PHY / 数据长度 / MTU / 发现服务放在系统工作队列(在 BT RX 线程里调用会死锁,实测 `Controller unresponsive, opcode 0x2032`)。`src/usb.c`:中断 + 环形缓冲收发;`src/main.c`:命令 `I` / `C` 配置 / `W` 写控制特征(槽位掩码,两块板的命令紧接着发)/ `X` 断开。`src/usb_test.c`:USB 测速(`-Dfw_bridge_USB_TEST=1`)。`tools/bridge.ps1`:build / flash / rtt。说明在 `fw_bridge/README.md`。
+  - `host/bridge.py`(新):串口收发、按槽位分流、`Bridge.configure / write / disconnect / wait_ready(after=…)`(相机板复位后旧连接要 4 s 监督超时才断,只认复位后的就绪事件);`release()` 让桥放开所有板子(Windows 直连工具要用);命令行 `python bridge.py --stream --duration 20` 两块板同时推流并打印速率。
+  - `host/ble_bench.py`:`--bridge [PORT]`,`--board` 可给两块板(同时推流,每块一行结果 / 一行 CSV,CSV 加了 `link`、`kb_per_s` 列);直连模式先 `bridge.release()`。
+  - `host/stereo.py`:`--bridge [PORT]`、`--interval-ms`:两块板经桥连接,拍照时一条桥命令同时写两块板的 0xB2。
+  - `host/usb_test.py`(新):桥 USB 双向测速 + 数据校验。
+  - `fw_nrf5340/src/hw_test.c`(新,`-Cflags HW_TEST`):10-10 新接的线的自检:HM0360 I2C、**FSIN**(P1.11,开 FSYNC 后脉冲才出帧)、**TRIGGER**(P0.25,Streaming 4)、**PSRAM**(SPIM4 8 MHz,引脚强驱动,CS P1.12 / SDI P1.13 / SDO P1.14 / SCK P1.15:线间短路、读 ID、图案、软件 SPI 对照、1–8 MHz、整片 8 MB × 2 轮)。`main.c` 里 `#ifdef HW_TEST` 时只跑自检。
+  - `fw_nrf5340/tools/dk5340.ps1`:仓库路径没有空格(git worktree)时原地编译,不再 `subst V:`(否则会编到 V: 指向的另一份代码)。
+- **为什么**:Windows 每次连接自己定参数、两块板同时连时速度不一致;桥固定参数,也是时间同步方案 E(`conn_time_sync`,需要桥当中心设备)的前提。
+- **和原代码的行为差异**:相机板 **ATT MTU 247 → 498**(`fw_nrf5340/prj.conf`,用户 10-11 决定;`fw/` 是 247):一个 495 字节的通知正好填满两个 251 字节的链路层包,接收端要处理的通知数减半;帧格式、协议不变,电脑端不用改。其余相机板行为不变;新增的是桥、电脑端工具和 `HW_TEST` 编译选项。
+- **验证**(QVGA,每轮 30 s,同一时段 Windows 直连 / 桥交替 2 轮,全部 0 丢包):
+  | | Windows 直连 | 桥(15 ms) |
+  |---|---|---|
+  | 单板,相机 MTU 247 | 1.00 / 1.05 fps(75–79 KB/s) | 1.40 / 1.37 fps(103–105 KB/s) |
+  | 单板,相机 MTU 498(实验) | 1.07 / 1.08 fps(81 KB/s) | **1.56 / 1.56 fps(117 KB/s)**,每帧 0.52–0.61 s |
+  | 双板推流 | 合计 65 KB/s,左板慢一倍多(10-08) | 每块约 55 KB/s,两块一样 |
+  | 双板 VGA 拍一对(`stereo.py`,5 对) | 9.2 s,左右差 3.7 s(10-08) | **5.6–5.9 s,左右差约 0.1 s** |
+  - 间隔:单板 7.5 / 15 / 30 ms 差别不大;双板 30 ms、10 ms 时两条连接不均衡(一块 0.4 fps、一块 1.2 fps),7.5 / 15 ms 均衡 → 默认 15 ms。
+  - 双板合计稳定在约 110–116 KB/s:桥不往 USB 转发(只计数)时一样,连接事件长度改成不限一样,相机板网络核发送缓冲 3 → 10 也没变化 → 瓶颈在桥的 BLE 协议栈每包处理(CPU 约 55% + 控制器中断)。MTU 498 让通知数减半,单板 +13%。
+  - USB:双向 4 MB × 3 轮 0 错误,桥 → 电脑 212 KB/s(Zephyr CDC ACM 一次发一个 64 B 包,换独立工作队列不变),够两块板用。
+  - 硬件自检:两块板 I2C / FSIN / TRIGGER 都通过。FSIN:不打脉冲 0 帧,每 500 ms 一个脉冲 4/4 出帧,每 250 ms 一个时 8 个只出 6 帧,脉冲 → FVLD 约 12 ms。PSRAM:两块板都通过(ID `0D 5D`,整片 8 MB 写读 2 轮 0 错误,写 910–917 KB/s、读 782–789 KB/s,片选连续拉低约 1 ms 写 1 KB,未遵守 tCEM)。HM0360 板一开始 ID 读成 `0B 6D`、只有全 0 / 全 1 读得对(规律:SDO 每次 0→1,芯片多收一个时钟;没有短路,GPIO 软件 SPI 也一样);**SCK / SDI / CS 改成强驱动(H0H1)后正常**,自检默认强驱动(`PSRAM_STANDARD_DRIVE` 可对比)。
+  - MTU 498 定版后晚上(18:50)复测:桥单板 1.33–1.37 fps(上午同配置 1.56),Windows 直连 1.08 fps(和上午一样);这时 7.5 / 15 / 30 ms 三种间隔都约 1.36 fps。配置相同,差异归为时段 / 无线环境,原因没查清。双板 15 ms:0.71 / 0.74 fps,两块一样。
+  - 定版(用户 10-11):**桥默认间隔 15 ms**(单板时间隔影响很小;双板 15 ms 均衡)、**相机 MTU 498**。
+- **遗留 / 下一步**:FSIN 每 250 ms 一个脉冲时丢脉冲的原因;桥 RTT 里 Windows 枚举时的 `udc: Failed to allocate net_buf 4095`(端口正常)。下一阶段:帧头 v2。
+
 ## 2026-10-10 · 10-09 双目照片:多种拼接方法 + VLM 能看清多少(PR #38,Issue #37)
 
 - **阶段**:工具 / 评估(计划见 Obsidian `10.5~10.11/HM0360图片sititch尝试.md`、`HM0360图片VLM理解.md`)
@@ -37,6 +107,7 @@
   - 真值改成 **Claude 读手机原图(全分辨率局部)** 的结果,不再用 VGA 图起草;饼干盒手机拍的是另一面,前面分开记;每段文字估了在各图里的大写字母像素高度(±30 %)。`vlm_score.py` 加按像素高度统计"读出率"(`vlm_text_hits.csv`)。
   - 结果见 Obsidian `HM0360图片VLM理解.md` §9。要点:**大写字母约 8 px 以上基本都能读出,4–6 px 约三分之一,4 px 以下几乎读不出**;VGA 上大部分小字只有 2–6 px。
 - **遗留 / 下一步**:用户核对 `truth.json`(饼干盒正面、万用表标了 verify)、给拼接打分。Warping Residual 官方代码没找到,`multi_h` 是简化版。字高是估计值,每个高度区间的样本数不多。
+
 
 ## 2026-10-08 · 双板最小流程:"拍一张"命令 0xB2 + 左右同时拍、旋转、拼接(PR #36,Issue #35)
 

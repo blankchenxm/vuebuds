@@ -16,6 +16,7 @@ typedef enum {
   EVENT_MONITOR_WAKE,
   EVENT_CAMERA_ASLEEP,
   EVENT_CAMERA_SNAPSHOT,
+  EVENT_BLE_COMMAND,  // a multi-byte control command is queued (bleNextCommand)
 } event_t;
 
 void eventQueuePush(event_t event);

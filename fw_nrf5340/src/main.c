@@ -2,11 +2,14 @@
  * nRF5340 DK port of fw/main.c: camera + BLE streaming (CAM_APP=STREAM, the default; it
  * also takes single pictures on 0xB2, snapshot.h) or Monitor (CAM_APP=MONITOR). The main thread runs the same event loop as fw/; it sleeps in
  * eventQueueWait() instead of nrf_pwr_mgmt_run(), and sends a frame in one call
- * (bleSendFrame returns once every packet is queued) instead of polling bleService().
+ * (imageSend / bleSendImage return once every packet is queued) instead of polling bleService().
  * The VueBuds board's PMU, IMU, buttons, LEDs and CLI are not ported.
  */
 #include <zephyr/kernel.h>
 #include <zephyr/sys/reboot.h>
+#ifdef CPU_128MHZ
+#include <nrfx_clock.h>
+#endif
 
 #include "nrf_log.h"
 #include "event.h"
@@ -14,6 +17,7 @@
 #include "monitor.h"
 #include "snapshot.h"
 #include "ble.h"
+#include "image.h"
 #include "i2c.h"
 #include "timers.h"
 
@@ -77,7 +81,8 @@ static void processEvent(event_t event)
       NRF_LOG_RAW_INFO("%08d [cam] EVENT_CAMERA_CAPTURE_DONE\n", systemTimeGetMs());
       camera_frame_t frame;
       if (cameraGetFrame(&frame)) {
-        bleSendFrame(frame.pixels, frame.stride, frame.width, frame.height);
+        imagePrepare(&frame);
+        imageSend(&frame);
       }
       // Sent (or a bad frame, not sent): capture the next one.
       eventQueuePush(EVENT_CAMERA_READY_NEXT_FRAME);
@@ -107,6 +112,21 @@ static void processEvent(event_t event)
       break;
 #endif
 
+    case EVENT_BLE_COMMAND: {
+      ble_command_t cmd;
+      while (bleNextCommand(&cmd)) {
+        imageCommand(&cmd);
+#ifndef CAMERA_APP_MONITOR
+        if (cmd.data[0] == IMAGE_CMD_SET_EXPOSURE) {
+          snapshotExposureChanged();
+        } else if (cmd.data[0] == IMAGE_CMD_CODEC_BENCH && !streaming) {
+          snapshotRequest();  // the bench picture (while streaming: the next streamed frame)
+        }
+#endif
+      }
+      break;
+    }
+
     default:
       NRF_LOG_RAW_INFO("%08d [main] unhandled event:%d\n", systemTimeGetMs(), event);
       break;
@@ -115,8 +135,22 @@ static void processEvent(event_t event)
 
 int main(void)
 {
+#ifdef CPU_128MHZ
+  // Experiment (10-11): the application core runs at 64 MHz by default (HFCLK / 2); 128 MHz as
+  // in nrf/samples/bluetooth/nrf_auraconfig, for the JPEG / PNG encoders.
+  int divErr = nrfx_clock_divider_set(NRF_CLOCK_DOMAIN_HFCLK, NRF_CLOCK_HFCLK_DIV_1);
+  SystemCoreClockUpdate();
+  NRF_LOG_RAW_INFO("[mustard] CPU %u MHz (%d)\n", SystemCoreClock / 1000000, divErr);
+#endif
   NRF_LOG_RAW_INFO("%08d [mustard] booting... (nRF5340)\n", systemTimeGetMs());
   i2cInit();
+#ifdef HW_TEST
+  extern void hwTestRun(void);
+  hwTestRun();  // hardware check only (src/hw_test.c): no BLE, no camera application
+  for (;;) {
+    k_sleep(K_FOREVER);
+  }
+#endif
   bleInit();
   NRF_LOG_RAW_INFO("%08d [mustard] booted\n", systemTimeGetMs());
 

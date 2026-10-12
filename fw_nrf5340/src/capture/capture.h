@@ -38,6 +38,7 @@ typedef struct {
   bool overflow;           // SPIS dropped bytes because a segment buffer was full
   bool ok;                 // every segment got exactly its lines and nothing overflowed
   uint32_t duration_us;    // FVLD rise to last segment done
+  uint32_t start_us;       // systemTimeGetUs() at the FVLD rise of this frame (interrupt time)
   uint32_t arm_to_fvld_us; // arming to the first FVLD rise (incl. skipped frames)
 } capture_stats_t;
 
@@ -52,6 +53,9 @@ uint32_t frame_pool_init(uint32_t frame_bytes, uint32_t dma_offset);
 uint32_t frame_pool_size(void);
 uint32_t frame_pool_slot_count(void);
 uint8_t *frame_pool_slot(uint32_t index);
+/* The pool past the first `slots` slots (used by apps that keep only those slots, e.g. the
+ * encoders' workspace and output after slot 0 in stream / picture builds). */
+uint8_t *frame_pool_after(uint32_t slots, uint32_t *size);
 
 /* Set up frame sync GPIOs, CS, SPIS and the pool for the given mode. */
 void capture_init(const camera_mode_info_t *info);

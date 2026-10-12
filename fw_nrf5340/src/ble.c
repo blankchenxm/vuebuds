@@ -1,10 +1,12 @@
 /*
  * BLE peripheral "mustard" on Zephyr, same protocol as fw/ble_manager.c + fw/ble_cus.c:
  *   service 47ea1400-a0e4-554e-5282-0afcd3246970
- *   data    ...1402  notify: [seq, flags, payload...], flags bit0 = start of frame; a
- *                   start-of-frame payload begins with width, height (uint16 LE each)
+ *   data    ...1402  notify: [seq, flags, payload...], flags bit0 = start of frame; fw/'s
+ *                   start-of-frame payload begins with width, height (uint16 LE each); here
+ *                   flags bit1 is set and it begins with ble_frame_header_t (v2, ble.h)
  *   control ...1403  write 0xB1: start the camera stream (read / notify, 1 byte)
  *                    write 0xB2: take one picture (not in fw/; see snapshot.h)
+ *                    longer writes (0xB3 ...): commands for the main thread (image.c)
  * Like fw/, turning data notifications off or disconnecting reboots the chip.
  */
 #include <string.h>
@@ -23,6 +25,7 @@
 
 #define ADV_INTERVAL 300  // 187.5 ms in 0.625 ms units, as fw/main.h APP_ADV_INTERVAL
 #define PACKET_FLAG_START_OF_FRAME 0x01
+#define PACKET_FLAG_HEADER_V2 0x02
 #define CMD_STREAM_START 0xB1
 #define CMD_STREAM_STOP 0xB0
 #define CMD_SNAPSHOT 0xB2
@@ -39,6 +42,8 @@ static uint8_t controlValue;
 static uint8_t sequenceNumber;
 static uint8_t packet[CONFIG_BT_L2CAP_TX_MTU];
 K_SEM_DEFINE(notifySlots, NOTIFY_IN_FLIGHT, NOTIFY_IN_FLIGHT);
+BUILD_ASSERT(sizeof(ble_frame_header_t) == 22, "frame header v2 is 22 bytes (host/protocol.py HEADER_V2)");
+K_MSGQ_DEFINE(commandQueue, sizeof(ble_command_t), 8, 4);
 
 static void dataCccChanged(const struct bt_gatt_attr *attr, uint16_t value)
 {
@@ -58,12 +63,18 @@ static ssize_t controlRead(struct bt_conn *conn, const struct bt_gatt_attr *attr
 static ssize_t controlWrite(struct bt_conn *conn, const struct bt_gatt_attr *attr, const void *buf, uint16_t len,
                             uint16_t offset, uint8_t flags)
 {
-  if (offset != 0 || len != 1) {
+  if (offset != 0 || len < 1 || len > BLE_COMMAND_MAX) {
     return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
   }
   uint8_t cmd = *(const uint8_t *)buf;
-  NRF_LOG_INFO("writing to 1403 0x%02x", cmd);
-  if (cmd == CMD_STREAM_START) {
+  NRF_LOG_INFO("writing to 1403 0x%02x (%u bytes)", cmd, len);
+  if (len > 1 || (cmd != CMD_STREAM_START && cmd != CMD_SNAPSHOT && cmd != CMD_STREAM_STOP)) {
+    ble_command_t c = {.len = len};
+    memcpy(c.data, buf, len);
+    if (k_msgq_put(&commandQueue, &c, K_NO_WAIT) == 0) {
+      eventQueuePush(EVENT_BLE_COMMAND);
+    }
+  } else if (cmd == CMD_STREAM_START) {
     eventQueuePush(EVENT_CAMERA_STREAM_START);
   } else if (cmd == CMD_SNAPSHOT) {
     eventQueuePush(EVENT_CAMERA_SNAPSHOT);
@@ -107,7 +118,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
   }
   currentConn = bt_conn_ref(conn);
   NRF_LOG_RAW_INFO("%08d [ble] connected\n", systemTimeGetMs());
-  bt_gatt_exchange_mtu(conn, &mtuParams);  // like nrf_ble_gatt: ask for MTU 247
+  bt_gatt_exchange_mtu(conn, &mtuParams);  // like nrf_ble_gatt: ask for the largest MTU (498, prj.conf)
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -212,39 +223,42 @@ static bool sendPacket(uint16_t length)
   return true;
 }
 
-void bleSendFrame(const uint8_t *pixels, uint16_t stride, uint16_t width, uint16_t height)
+bool bleNextCommand(ble_command_t *cmd)
+{
+  return k_msgq_get(&commandQueue, cmd, K_NO_WAIT) == 0;
+}
+
+bool bleSendImage(const ble_frame_header_t *header, ble_reader_t read, void *ctx)
 {
   if (currentConn == NULL) {
-    return;
+    return false;
   }
   uint16_t maxPayload = MIN(bt_gatt_get_mtu(currentConn) - 3, sizeof(packet));
   bool startOfFrame = true;
-  uint16_t row = 0, col = 0;
+  uint32_t offset = 0;
 
-  while (row < height) {
+  while (startOfFrame || offset < header->length) {
     uint16_t length = 0;
     packet[length++] = sequenceNumber;
-    packet[length++] = startOfFrame ? PACKET_FLAG_START_OF_FRAME : 0;
+    packet[length++] = startOfFrame ? (PACKET_FLAG_START_OF_FRAME | PACKET_FLAG_HEADER_V2) : 0;
     if (startOfFrame) {
-      packet[length++] = width & 0xFF;
-      packet[length++] = width >> 8;
-      packet[length++] = height & 0xFF;
-      packet[length++] = height >> 8;
+      memcpy(&packet[length], header, sizeof(*header));
+      length += sizeof(*header);
     }
-    while (length < maxPayload && row < height) {
-      uint16_t n = MIN(maxPayload - length, width - col);
-      memcpy(&packet[length], pixels + (uint32_t)row * stride + col, n);
-      length += n;
-      col += n;
-      if (col == width) {
-        col = 0;
-        row++;
+    while (length < maxPayload && offset < header->length) {
+      size_t n = read(ctx, offset, &packet[length], MIN(maxPayload - length, header->length - offset));
+      if (n == 0) {
+        NRF_LOG_RAW_INFO("%08d [ble] image source failed at byte %u, frame dropped\n", systemTimeGetMs(), offset);
+        return false;
       }
+      length += n;
+      offset += n;
     }
     if (!sendPacket(length)) {
-      return;  // disconnected (EVENT_BLE_DISCONNECTED follows) or stalled
+      return false;  // disconnected (EVENT_BLE_DISCONNECTED follows) or stalled
     }
     startOfFrame = false;
     sequenceNumber++;
   }
+  return true;
 }
