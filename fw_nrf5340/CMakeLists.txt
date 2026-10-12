@@ -58,3 +58,11 @@ target_sources(app PRIVATE
 )
 file(GLOB APP_SOURCES src/*.c src/compat/*.c src/capture/*.c)
 target_sources(app PRIVATE ${APP_SOURCES})
+
+# JPEG / PNG encoders (lib/README.md): src/codec_jpeg.c / codec_png.c include the .inl files;
+# PNGenc's zlib subset is built here, warnings off for this third-party code.
+target_include_directories(app PRIVATE lib/jpegenc lib/pngenc)
+set(ZLIB_SOURCES lib/pngenc/adler32.c lib/pngenc/crc32.c lib/pngenc/deflate.c lib/pngenc/trees.c lib/pngenc/zutil.c)
+target_sources(app PRIVATE ${ZLIB_SOURCES})
+# -O2 (Zephyr builds -Os): measured faster encodes, see DEVLOG 10-11.
+set_source_files_properties(${ZLIB_SOURCES} src/codec_jpeg.c src/codec_png.c PROPERTIES COMPILE_OPTIONS "-w;-O2")

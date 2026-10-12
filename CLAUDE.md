@@ -23,6 +23,7 @@
   - RAM 保持现状(RTT 保留,日志缓冲 16 KB、堆 8 KB 不缩小)。
   - **BLE-USB 桥**(PR #40,用户 10-11):52840 DK `fw_bridge/` 当中心设备,**默认连接间隔 15 ms**(拒绝相机板自己的参数请求);**相机板 ATT MTU 498**(`fw/` 是 247;498 + 4 = 2 × 251,正好两个链路层包;517 反而要 3 个包)。
   - **帧头 v2**(PR #42,用户 10-10 同意):flags bit1 + 22 字节头(宽高、格式、质量、长度、拍摄时间、帧号、曝光寄存器、标志),`host/protocol.py` 兼容 v1。控制命令 `B3 <格式> <质量>`(运行时选格式,用户 10-10)、`B6` 自动 / 固定曝光。**HM0360 从 S2 唤醒时自己测光、不看曝光寄存器**(10-11 实测,预测光 / Context A / 延迟写都无效),所以固定曝光时拍照不进 S2;`stereo.py --exposure fixed|sync`。
+  - **板上压缩**(PR #?,用户 10-10:PNG + JPEG q95/90/85/75/60 在板上做、运行时用 `B3` 选):bitbank2 JPEGENC / PNGenc(`fw_nrf5340/lib/`,JPEGENC 加了数值质量补丁),输出写 PSRAM 再发;`B4` 同一帧发 7 种格式(`host/codec_bench.py`)。默认仍是原始格式。**应用核默认 64 MHz**,`-Cflags CPU_128MHZ` 编码快一倍(是否默认待定)。
   - **双板最小流程**(用户 10-07 要求,PR #36):5340 控制命令 **0xB2 = 拍一张**(只在 `fw_nrf5340/`;HM0360 平时 S2 睡眠,请求时唤醒采第 1 帧发出再睡;坏帧最多重拍 2 次;一次开机只用 0xB1 或 0xB2 其中一种)。`host/stereo.py`:Windows 同时连两块板、空格(或鼠标左键)同时拍、S(或右键)保存、`--flash VGA` 先给两块板烧模式(窗口不拼接,拼接离线用 `stitch.py`;**同一时间只能开一个 stereo.py,中文输入法会吃掉空格**),同时拍靠主机同时下命令(方案 A),不追求性能。图像旋转(`BOARDS` 的 `rotate`,顺时针):左板 `hm0360-5340` **90°**(10-07 实拍确认),右板 `hm0360b-5340` **270°**(10-08 用户确认,90° 时上下颠倒);左 = `hm0360-5340`、右 = `hm0360b-5340`(还没按佩戴位置确认)。拼接两种都保留(`cv2.Stitcher` + 论文的 ORB 流程,`host/stitch.py`),后续比较。后续优化(桥、同步 C/C' + FSIN、曝光、PSRAM、片上 JPEG、Mac 测试)见笔记 `10.5~10.11/硬件流程+后续优化.md`。
 
 ## 仓库结构
@@ -89,6 +90,7 @@
 
 ## 桥(fw_bridge/)和新硬件(2026-10-10 起)
 
+- 电脑端验证编码器:`fw_nrf5340/tools/codec_test/`(MinGW gcc `C:\MinGW\bin`,和固件同一份源码,`run_codec_test.py` 和 OpenCV 比)。
 - 两块 5340 板都加了 **FSIN → P1.11**、**TRIGGER → P0.25**、**PSRAM**(MIKROE DRAM Click,APS6404L 8 MB:CS P1.12、SDI P1.13、SDO P1.14、SCK P1.15,IO2 / IO3 接地,SPIM4 8 MHz,**SCK / SDI / CS 必须强驱动 H0H1**)。自检:`dk5340.ps1 run -Cflags 'HW_TEST' -Seconds 75`(`src/hw_test.c`,逐项 PASS / FAIL)。PSRAM 读 ID 应为 `0D 5D`;读成 `0B 6D`、只有全 0 / 全 1 读得对 = SCK 上有毛刺(SDO 跳变时芯片多收一个时钟):杜邦线下标准驱动不够,HM0360 板改强驱动后正常(10-11)。
 - 桥:默认间隔 15 ms(双板时 10 / 30 ms 两条连接不均衡);两块板合计约 110–116 KB/s 是桥这边的上限。相机板同时只接受一个连接:桥插着时 Windows 直连工具要先 `python bridge.py --release`(`ble_bench.py` 直连模式会自动做)。
 - 桥连上后的 PHY / 数据长度 / MTU / 发现服务**不能在 connected 回调(BT RX 线程)里调用**,会死锁并断言 `Controller unresponsive`;放到工作队列。
