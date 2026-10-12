@@ -38,6 +38,7 @@ typedef struct {
   bool overflow;           // SPIS dropped bytes because a segment buffer was full
   bool ok;                 // every segment got exactly its lines and nothing overflowed
   uint32_t duration_us;    // FVLD rise to last segment done
+  uint32_t start_us;       // systemTimeGetUs() at the FVLD rise of this frame (interrupt time)
   uint32_t arm_to_fvld_us; // arming to the first FVLD rise (incl. skipped frames)
 } capture_stats_t;
 

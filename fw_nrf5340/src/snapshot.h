@@ -13,11 +13,14 @@
  * A bad frame (wrong DMA byte count / overflow) is not sent: the sensor stays awake and the
  * next frame is taken instead (up to SNAPSHOT_MAX_RETAKES times).
  * A request while a picture is still being taken or sent is ignored.
+ * Manual exposure (0xB6): the HM0360 stays awake (no S2) and a request takes the next frame,
+ * because a wake from S2 meters the scene itself and ignores fixed exposure values (camera.c).
  */
 
 void snapshotRequest(void);    // EVENT_CAMERA_SNAPSHOT
 void snapshotFrameDone(void);  // EVENT_CAMERA_CAPTURE_DONE: sleep the sensor, send the frame
 void snapshotAsleep(void);     // EVENT_CAMERA_ASLEEP: XSLEEP went low on the frame boundary, stop MCLK
 bool snapshotActive(void);     // a picture has been requested since boot
+void snapshotExposureChanged(void);  // after 0xB6: manual -> wake and stay awake, auto -> sleep again
 
 #endif

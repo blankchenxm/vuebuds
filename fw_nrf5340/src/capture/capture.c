@@ -190,6 +190,7 @@ static void frame_done(void)
   }
   m_stats.ok = ok;
   m_stats.duration_us = (uint32_t)systemTimeGetUs() - m_frame_start_us;
+  m_stats.start_us = m_frame_start_us;
   m_stats.frame++;
   m_state = CAPTURE_IDLE;
   eventQueuePush(EVENT_CAMERA_CAPTURE_DONE);

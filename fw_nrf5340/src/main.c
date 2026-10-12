@@ -2,7 +2,7 @@
  * nRF5340 DK port of fw/main.c: camera + BLE streaming (CAM_APP=STREAM, the default; it
  * also takes single pictures on 0xB2, snapshot.h) or Monitor (CAM_APP=MONITOR). The main thread runs the same event loop as fw/; it sleeps in
  * eventQueueWait() instead of nrf_pwr_mgmt_run(), and sends a frame in one call
- * (bleSendFrame returns once every packet is queued) instead of polling bleService().
+ * (imageSend / bleSendImage return once every packet is queued) instead of polling bleService().
  * The VueBuds board's PMU, IMU, buttons, LEDs and CLI are not ported.
  */
 #include <zephyr/kernel.h>
@@ -14,6 +14,7 @@
 #include "monitor.h"
 #include "snapshot.h"
 #include "ble.h"
+#include "image.h"
 #include "i2c.h"
 #include "timers.h"
 
@@ -77,7 +78,8 @@ static void processEvent(event_t event)
       NRF_LOG_RAW_INFO("%08d [cam] EVENT_CAMERA_CAPTURE_DONE\n", systemTimeGetMs());
       camera_frame_t frame;
       if (cameraGetFrame(&frame)) {
-        bleSendFrame(frame.pixels, frame.stride, frame.width, frame.height);
+        imagePrepare(&frame);
+        imageSend(&frame);
       }
       // Sent (or a bad frame, not sent): capture the next one.
       eventQueuePush(EVENT_CAMERA_READY_NEXT_FRAME);
@@ -106,6 +108,19 @@ static void processEvent(event_t event)
       snapshotAsleep();
       break;
 #endif
+
+    case EVENT_BLE_COMMAND: {
+      ble_command_t cmd;
+      while (bleNextCommand(&cmd)) {
+        imageCommand(&cmd);
+#ifndef CAMERA_APP_MONITOR
+        if (cmd.data[0] == IMAGE_CMD_SET_EXPOSURE) {
+          snapshotExposureChanged();
+        }
+#endif
+      }
+      break;
+    }
 
     default:
       NRF_LOG_RAW_INFO("%08d [main] unhandled event:%d\n", systemTimeGetMs(), event);
