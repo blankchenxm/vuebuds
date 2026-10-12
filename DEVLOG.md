@@ -75,6 +75,40 @@
   - 定版(用户 10-11):**桥默认间隔 15 ms**(单板时间隔影响很小;双板 15 ms 均衡)、**相机 MTU 498**。
 - **遗留 / 下一步**:FSIN 每 250 ms 一个脉冲时丢脉冲的原因;桥 RTT 里 Windows 枚举时的 `udc: Failed to allocate net_buf 4095`(端口正常)。下一阶段:帧头 v2。
 
+## 2026-10-10 · 10-09 双目照片:多种拼接方法 + VLM 能看清多少(PR #38,Issue #37)
+
+- **阶段**:工具 / 评估(计划见 Obsidian `10.5~10.11/HM0360图片sititch尝试.md`、`HM0360图片VLM理解.md`)
+- **改了什么**:
+  - `host/stitch.py`:改成多方法:基线 `opencv`(PANORAMA)、`opencv_scans`、`orb`(论文);更强的匹配 `sift`、`asift`(OpenCV 5 没有 AKAZE,换成 ASIFT,抗视角变化)、`lightglue`(SuperPoint + LightGlue)、`loftr`(kornia,稠密匹配);抗视差 `apap`(Moving DLT,每 10 px 一个局部单应)、`multi_h`(顺序 RANSAC 找多个平面,每格选最近的那个;Warping Residual 的简化版)。匹配类方法沿用论文的"一个单应 + 左图直接盖上去";apap / multi_h 用羽化融合(错位会显示成重影)。每对目录写 `stitch_<方法>.png`、`matches_<方法>.png`(绿 = 内点、红 = 外点)、`compare.png`、`stitch_results.json`;集合目录写 `stitch_summary.csv` 和人工评分表 `stitch_score.csv`(只追加新行,不覆盖已填的分)。`--methods` 只重跑部分方法时和已有结果合并。lightglue / loftr 需要 torch(可选依赖,没装就跳过)。
+  - `host/vlm_eval.py`(新):左右两张原图放在同一次请求(Image 1 = 左、Image 2 = 右),英文提示词,temperature 0;任务 A(尽量详细描述、逐字转写文字、看不清写 [unreadable])、任务 B(手握 / 手指的是哪个物品 + 特征,只跑 `<集合>/eval_config.json` 里列出的对)。后端:OpenRouter(key 从环境变量或 `host/.env`,已 gitignore)、本地 Ollama。结果写 `<对>/vlm/<模型>_<任务>.json`、`<集合>/vlm_summary.csv`;429 限流时退避重试(30 s 起,最多 6 次)。
+  - `host/vlm_score.py`(新):和 `<集合>/truth.json` 对比打分:按字号分组的文字召回、"编造词"(模型说读到、但任何真值文字里都没有的词)、物品召回、任务 B 目标对不对。
+  - `host/.gitignore` 加 `.env`;`host/requirements.txt` 写明可选的 torch / kornia / lightglue(CUDA 版要从 PyTorch 的 cu128 源装,PyPI 只有 CPU 版)。
+- **为什么**:用户 10-09 要求:试各种(优先不用 GPU 的)方法把左右图拼成一张正常的图;测 QVGA / VGA 下 VLM 能看清多小的字、能否判断手指的物品。
+- **和原代码的行为差异**:只有电脑端工具;`stitch.py` 的 `orb` / `opencv` 结果不变,默认方法从 2 种变成 9 种。
+- **验证**(数据:`20261009_QVGA` 15 对、`20261009_VGA` 12 对,照片不进 git):
+  - 拼接成功率(自动判定,不代表好看):
+    | 方法 | opencv | scans | orb | sift | asift | lightglue | loftr | apap | multi_h |
+    |---|---|---|---|---|---|---|---|---|---|
+    | QVGA | 5/15 | 4/15 | 4/15 | 11/15 | 15/15 | 15/15 | 15/15 | 11/15 | 11/15 |
+    | VGA | 8/12 | 7/12 | 9/12 | 11/12 | 11/12 | 12/12 | 11/12 | 11/12 | 11/12 |
+  - 看图:物品摆在同一张桌上时多数方法都能拼成一张完整的图;手离得近,apap / multi_h 里有重影。好坏等用户在 `stitch_score.csv` 打分。
+  - VLM(只跑了 OpenRouter 上有的 Qwen3-VL-8B、Qwen3.5-9B;真值是 Claude 起草的草稿,待用户核对):
+    | | 大字召回 | 中字 | 小字 | 编造词 / 次 | 任务 B 目标正确 |
+    |---|---|---|---|---|---|
+    | Qwen3-VL-8B QVGA | 0.92 | 0.23 | 0.19 | 2.9 | 6/9 |
+    | Qwen3-VL-8B VGA | 1.00 | 0.88 | 0.68 | 1.8 | 5/5 |
+    | Qwen3.5-9B QVGA | 0.96 | 0.25 | 0.19 | 2.9 | 6/9 |
+    | Qwen3.5-9B VGA | 1.00 | 0.78 | 0.73 | 0.8 | 5/5 |
+    QVGA 下中小字基本读不出,而且会编(把 KRYLON 读成 RAYLYN / HAYLON,把喷漆说成 "Aussie 护发喷雾");VGA 下中字读出约 80–90%、小字约 70%。
+- **10-11 追加:本地 3 个模型 + 手机照片对照**:
+  - Ollama 0.40 装在 D 盘(`D:\Ollama`,模型 `D:\OllamaModels`,约 18 GB),跑 Qwen2.5-VL-7B、MiniCPM-V 4.5、Gemma 4 E4B(RTX 4060,每次 10–50 s)。Moondream 3 这轮不测(用户决定)。
+  - `vlm_eval.py`:本地模型加 `repeat_penalty 1.15`(temperature ≈0 时 Qwen2.5-VL / MiniCPM 会无限重复 "ALMOND ALMOND …" 直到 token 上限,QVGA 第一次跑约一半回答是这样,已全部重跑);Gemma 4 关掉思考(`think: false`,否则思考吃掉大部分 token 预算、正文被截断);`num_ctx 8192`;新增单张图模式(目录里放 `image.png`,用单图提示词)。**本地模型和 API 模型的解码设置不同(repeat_penalty)**。
+  - `host/make_phone_eval.py`(新):用户 10-11 加了 6 个单物品的手机照片(`captures/20261009_phone`,5712×4284),生成 4 个版本:彩色 / 灰度长边 2048、灰度 640×480、灰度 320×240(后两个 = 和 VGA / QVGA 一样多的像素,但没有 HM0360 的镜头 / 噪声)。
+  - 真值改成 **Claude 读手机原图(全分辨率局部)** 的结果,不再用 VGA 图起草;饼干盒手机拍的是另一面,前面分开记;每段文字估了在各图里的大写字母像素高度(±30 %)。`vlm_score.py` 加按像素高度统计"读出率"(`vlm_text_hits.csv`)。
+  - 结果见 Obsidian `HM0360图片VLM理解.md` §9。要点:**大写字母约 8 px 以上基本都能读出,4–6 px 约三分之一,4 px 以下几乎读不出**;VGA 上大部分小字只有 2–6 px。
+- **遗留 / 下一步**:用户核对 `truth.json`(饼干盒正面、万用表标了 verify)、给拼接打分。Warping Residual 官方代码没找到,`multi_h` 是简化版。字高是估计值,每个高度区间的样本数不多。
+
+
 ## 2026-10-08 · 双板最小流程:"拍一张"命令 0xB2 + 左右同时拍、旋转、拼接(PR #36,Issue #35)
 
 - **阶段**:新功能(双耳最小流程,见 Obsidian `02-daily_raw/10.5~10.11/硬件流程+后续优化.md`)
