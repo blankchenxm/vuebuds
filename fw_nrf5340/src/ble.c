@@ -107,7 +107,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
   }
   currentConn = bt_conn_ref(conn);
   NRF_LOG_RAW_INFO("%08d [ble] connected\n", systemTimeGetMs());
-  bt_gatt_exchange_mtu(conn, &mtuParams);  // like nrf_ble_gatt: ask for MTU 247
+  bt_gatt_exchange_mtu(conn, &mtuParams);  // like nrf_ble_gatt: ask for the largest MTU (498, prj.conf)
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)

@@ -117,6 +117,13 @@ int main(void)
 {
   NRF_LOG_RAW_INFO("%08d [mustard] booting... (nRF5340)\n", systemTimeGetMs());
   i2cInit();
+#ifdef HW_TEST
+  extern void hwTestRun(void);
+  hwTestRun();  // hardware check only (src/hw_test.c): no BLE, no camera application
+  for (;;) {
+    k_sleep(K_FOREVER);
+  }
+#endif
   bleInit();
   NRF_LOG_RAW_INFO("%08d [mustard] booted\n", systemTimeGetMs());
 

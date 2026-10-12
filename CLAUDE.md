@@ -21,6 +21,7 @@
   - **Monitor 两颗传感器都做**(HM01B0 版 2026-10-02 用户提出):HM0360 用 S2;HM01B0 没有 S2,**MCLK 常开、传感器一直出帧**,就是推流流程去掉 BLE(PR #22)。不开运动检测;不做触发/回传;52840 不做 VGA(5340 的 HM0360 从 10-07 起支持 VGA)。S2 唤醒流程(XSLEEP 低 → 关 MCLK → 开 MCLK → XSLEEP 高)已实测:立刻能读 I2C,寄存器保留,不用重写。
   - **Monitor 实现**(PR #16,2026-10-01 用户确认):编译时 `CAM_APP=MONITOR`(默认 `STREAM`)、开机自动开始、RTC2 周期 `MONITOR_PERIOD_MS = 500`、每次唤醒**不跳帧**,存唤醒后的第 1 帧(`MONITOR_SKIP_FRAMES = 0`;2026-10-02 用户决定,PR #28,原来是跳 1 帧:实测第 1 帧和第 2、3 帧亮度相同、帧间差异 1–2/255 = 正常噪声,只在静止室内场景测过,睡眠中光线突变未测);传感器开始时进流模式,之后只靠 XSLEEP + MCLK 睡眠 / 唤醒;BLE 照常广播、不推流;代码在 `fw/monitor.c`。(52840 不做 VGA;5340 从 10-07 起支持 HM0360 VGA,见"nRF5340"一节。)开机按型号自动选 HM0360 / HM01B0 流程;HM01B0 不跳帧;`MONITOR_PERIOD_MS=0` 每帧都存(`dk.ps1 -PeriodMs 0`);坏帧(字节数不对)不存、不发(PR #20)。
   - RAM 保持现状(RTT 保留,日志缓冲 16 KB、堆 8 KB 不缩小)。
+  - **BLE-USB 桥**(PR #40,用户 10-11):52840 DK `fw_bridge/` 当中心设备,**默认连接间隔 15 ms**(拒绝相机板自己的参数请求);**相机板 ATT MTU 498**(`fw/` 是 247;498 + 4 = 2 × 251,正好两个链路层包;517 反而要 3 个包)。
   - **双板最小流程**(用户 10-07 要求,PR #36):5340 控制命令 **0xB2 = 拍一张**(只在 `fw_nrf5340/`;HM0360 平时 S2 睡眠,请求时唤醒采第 1 帧发出再睡;坏帧最多重拍 2 次;一次开机只用 0xB1 或 0xB2 其中一种)。`host/stereo.py`:Windows 同时连两块板、空格(或鼠标左键)同时拍、S(或右键)保存、`--flash VGA` 先给两块板烧模式(窗口不拼接,拼接离线用 `stitch.py`;**同一时间只能开一个 stereo.py,中文输入法会吃掉空格**),同时拍靠主机同时下命令(方案 A),不追求性能。图像旋转(`BOARDS` 的 `rotate`,顺时针):左板 `hm0360-5340` **90°**(10-07 实拍确认),右板 `hm0360b-5340` **270°**(10-08 用户确认,90° 时上下颠倒);左 = `hm0360-5340`、右 = `hm0360b-5340`(还没按佩戴位置确认)。拼接两种都保留(`cv2.Stitcher` + 论文的 ORB 流程,`host/stitch.py`),后续比较。后续优化(桥、同步 C/C' + FSIN、曝光、PSRAM、片上 JPEG、Mac 测试)见笔记 `10.5~10.11/硬件流程+后续优化.md`。
 
 ## 仓库结构
@@ -31,6 +32,7 @@
 - `fw/sdk/`:整份 SDK(已打好 `sdk_patch/nrfx_spis*` 补丁);`fw/_build/` 是作者在 macOS 上的编译产物,不要改;Windows 编译输出在 `fw/_build_win/`(已 gitignore)。
 - `fw/wiring_test.c`:HM0360 接线 / 状态检测工具(`CFLAGS=-DWIRING_TEST` 才编译,开机等 RTT 接上后逐项打印 PASS/FAIL),换模块、怀疑接线时先跑它。
 - `fw_nrf5340/`:nRF5340 DK 版(NCS v3.2.1 / Zephyr,sysbuild:应用核 + 网络核 `ipc_radio`)。直接编译 `../fw/sensors/`(不复制),`src/compat/` 提供驱动用到的 nRF5 SDK 头文件;`src/capture/` 是 DPPI 版硬件片选;`src/camera.c`、`src/monitor.c` 从 `fw/` 移植;`src/ble.c` 协议和 `fw/` 相同。说明见 `fw_nrf5340/README.md`。
+- `fw_bridge/`:BLE-USB 桥(NCS v3.2.1,52840 DK,以后换 5340 只换编译目标):BLE 中心设备同时连两块相机板,通知经 USB CDC ACM(DK 侧面 nRF USB 口)转给电脑。`tools/bridge.ps1 flash|build|rtt`;协议和实测见 `fw_bridge/README.md`,电脑端 `host/bridge.py`(`stereo.py --bridge`、`ble_bench.py --bridge --board A B`)。
 - `host/`:电脑端 `viewer.py`(BLE 实时预览,空格存图,`--rtt --reset` 合并固件日志);`stereo.py`(两块 5340 板空格同时拍一对、旋转后左右并排显示,S 存到 `captures/stereo/`);`stitch.py`(离线对存下的对做两种拼接并显示:`python stitch.py captures/stereo/<一对>`,左边原图、右边拼接结果;`--no-show` 批量统计)。`host/protocol.py` 的 `BOARDS` 有四块板:`hm0360`、`hm01b0` 是 52840,`hm0360-5340`、`hm0360b-5340` 是 5340(两块都接 HM0360)。
 - `hw/`:KiCad 硬件。**用户可能有未提交的 KiCad 改动和锁文件,不要提交、不要还原。**
 
@@ -57,7 +59,7 @@
 ```
 - 直接用 make:`make banji_dev CAM_MODE=QQVGA CAM_TEST_PATTERN=COLOR_BAR OUTPUT_DIRECTORY=_build_win_qqvga_colorbar ...`。**只改这些参数时 SDK Makefile 不会重新编译**,所以每种组合要用不同的 `OUTPUT_DIRECTORY`(`dk.ps1` 已自动处理)。
 - 在 bash 里直接调 make 要额外 CFLAGS 时,用环境变量:`CFLAGS=-DXXX make banji_dev ...`;**不要**在命令行写 `CFLAGS+=`,会覆盖 Makefile 里的全部参数。
-- 设备:**两块 DK 同时接在电脑上**(2026-10-02 起):HM0360 板 J-Link SN `1050291681`、BLE `C8:1A:80:9C:01:BC`;HM01B0 板 SN `1050221517`、BLE `D6:25:79:FD:6A:6B`;芯片都是 nRF52840 **REV3**。`dk.ps1 -Board HM0360|HM01B0`(默认 HM0360)、`viewer.py / ble_receive.py --board hm0360|hm01b0` 选板;直接用 nrfjprog 要加 `--snr`,JLinkRTTLogger 加 `-USB <SN>`,JLink.exe 加 `-USB <SN>`。BLE 名都是 `mustard`(viewer / ble_receive 按名字扫描);数据特征 `47ea1402-a0e4-554e-5282-0afcd3246970`(notify),控制 `47ea1403-…`,写 `0xB1` 开始推流(`ble_cus.h` 注释里的 UUID 字节序是错的)。
+- 设备:HM0360 52840 板 J-Link SN `1050291681`、BLE `C8:1A:80:9C:01:BC`;~~HM01B0 板 SN `1050221517`、BLE `D6:25:79:FD:6A:6B`~~ **2026-10-10 起这块 DK 是 BLE-USB 桥(`fw_bridge/`),`fw/` 和 SoftDevice 已擦**;芯片都是 nRF52840 **REV3**。`dk.ps1 -Board HM0360|HM01B0`(默认 HM0360)、`viewer.py / ble_receive.py --board hm0360|hm01b0` 选板;直接用 nrfjprog 要加 `--snr`,JLinkRTTLogger 加 `-USB <SN>`,JLink.exe 加 `-USB <SN>`。BLE 名都是 `mustard`(viewer / ble_receive 按名字扫描);数据特征 `47ea1402-a0e4-554e-5282-0afcd3246970`(notify),控制 `47ea1403-…`,写 `0xB1` 开始推流(`ble_cus.h` 注释里的 UUID 字节序是错的)。
 - 诊断:RTT 是主要手段;读 RAM 变量/寄存器可以用 `JLink.exe -CommandFile`(一次会话批量读,比逐条 `nrfjprog --memrd` 快很多);`arm-none-eabi-nm` 查变量地址。
 
 ## nRF5340(fw_nrf5340/)
@@ -83,6 +85,14 @@
   - PowerShell 里别把 `dk5340.ps1 flash` 的输出接到 `Select-Object -First N`:管道提前结束会杀掉 west,结果只烧了网络核、没烧应用核。
   - **HM0360B 板 VGA 偶发 `OVERFLOW, BAD`,每段字节数都对**(10-08,拍照命令下 25 张里 5 张;HM0360 板和 QVGA 没见过),根因未查。0xB2 会自动重拍;推流时这一帧被丢掉。
   - 双板拍照时抓 RTT:不要用 `dk5340.ps1 rtt`(会复位板子),直接起 `JLinkRTTLogger -USB <SN>` 附着,`stereo.py` 照常连。
+
+## 桥(fw_bridge/)和新硬件(2026-10-10 起)
+
+- 两块 5340 板都加了 **FSIN → P1.11**、**TRIGGER → P0.25**、**PSRAM**(MIKROE DRAM Click,APS6404L 8 MB:CS P1.12、SDI P1.13、SDO P1.14、SCK P1.15,IO2 / IO3 接地,SPIM4 8 MHz,**SCK / SDI / CS 必须强驱动 H0H1**)。自检:`dk5340.ps1 run -Cflags 'HW_TEST' -Seconds 75`(`src/hw_test.c`,逐项 PASS / FAIL)。PSRAM 读 ID 应为 `0D 5D`;读成 `0B 6D`、只有全 0 / 全 1 读得对 = SCK 上有毛刺(SDO 跳变时芯片多收一个时钟):杜邦线下标准驱动不够,HM0360 板改强驱动后正常(10-11)。
+- 桥:默认间隔 15 ms(双板时 10 / 30 ms 两条连接不均衡);两块板合计约 110–116 KB/s 是桥这边的上限。相机板同时只接受一个连接:桥插着时 Windows 直连工具要先 `python bridge.py --release`(`ble_bench.py` 直连模式会自动做)。
+- 桥连上后的 PHY / 数据长度 / MTU / 发现服务**不能在 connected 回调(BT RX 线程)里调用**,会死锁并断言 `Controller unresponsive`;放到工作队列。
+- sysbuild 下给桥传选项要写 `-Dfw_bridge_<NAME>`(和 `fw_nrf5340` 一样)。
+- 仓库路径有空格时脚本用 `subst V:`;**git worktree 放在没有空格的路径**(如 `D:\Projects\vuebuds_wt`)时 `dk5340.ps1` / `bridge.ps1` 原地编译。
 
 ## 已知坑
 

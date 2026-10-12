@@ -5,6 +5,8 @@ on both (control command 0xB2) at the same time, rotate each and show them side 
   python stereo.py --flash VGA              # first flash VGA (or QVGA / QQVGA) to both boards
   python stereo.py --auto 5 --interval 3    # take and save 5 pairs without the keyboard, then quit
   python stereo.py --rotate-left 180        # override a board's rotation (degrees clockwise)
+  python stereo.py --bridge                 # through the BLE-USB bridge (fw_bridge/) instead of
+                                            # Windows Bluetooth; both 0xB2 go out in one bridge command
 
 S saves the pair on screen to captures/stereo/<time>/: left.png, right.png (rotated, native
 resolution) and info.json (timings). Stitch saved pairs offline with stitch.py.
@@ -85,6 +87,40 @@ class BoardLink:
         return time.monotonic()
 
 
+class BridgeBoardLink:
+    """One board behind the BLE-USB bridge (slot 0 = left, 1 = right); the bridge reconnects."""
+
+    def __init__(self, side: str, slot: int, board: str, log: SessionLog,
+                 on_frame: Callable[[str, protocol.Frame], None]):
+        self.side = side
+        self.slot = slot
+        self.board = board
+        self.address = protocol.BOARDS[board]["address"]
+        self.log = log
+        self.link = None  # bridge.Link (updated in place by the bridge reader)
+        self._ready = False
+        self.fresh = False
+        self.assembler = protocol.FrameAssembler(lambda f: on_frame(side, f), lambda m: log(side, m))
+
+    @property
+    def ready(self) -> bool:
+        return self._ready
+
+    @property
+    def status(self) -> str:
+        if self.link is None:
+            return "connecting"
+        return "ready" if self.link.ready else ("connected" if self.link.connected else "reconnecting")
+
+    def on_event(self, link):
+        was_ready, self._ready = self._ready, link.ready
+        self.link = link
+        if link.ready and not was_ready:
+            self.fresh = True  # the board rebooted: the next picture includes the camera init
+            self.log(self.side, f"ready via bridge: {self.board} {link.address}, interval {link.interval_ms:g} ms, "
+                                f"PHY {link.phy}, data length {link.data_length}, MTU {link.mtu}")
+
+
 class Pair:
     def __init__(self, index: int, warmup: bool):
         self.index = index
@@ -97,9 +133,23 @@ class Pair:
 class Stereo:
     """Owns both connections on one asyncio loop (background thread)."""
 
-    def __init__(self, log: SessionLog, boards: dict[str, str]):
+    def __init__(self, log: SessionLog, boards: dict[str, str], bridge_port: Optional[str] = None,
+                 interval_ms: float = 15.0):
         self.log = log
-        self.links = {side: BoardLink(side, boards[side], log, self._on_frame) for side in SIDES}
+        self.bridge = None
+        if bridge_port is not None:
+            import bridge
+            self.links = {side: BridgeBoardLink(side, i, boards[side], log, self._on_frame) for i, side in enumerate(SIDES)}
+            by_slot = list(self.links.values())
+            self.bridge = bridge.Bridge(
+                bridge_port or None,
+                on_notify=lambda slot, d: by_slot[slot].assembler.feed(d),
+                on_text=lambda slot, t: log(by_slot[slot].side if slot < 2 else "bridge", f"bridge: {t}"),
+                on_event=lambda slot, l: by_slot[slot].on_event(l))
+            self.bridge.configure([l.address for l in by_slot], interval_ms)
+            log("host", f"bridge on {self.bridge.port}, interval {interval_ms:g} ms")
+        else:
+            self.links = {side: BoardLink(side, boards[side], log, self._on_frame) for side in SIDES}
         self.pending: Optional[Pair] = None
         self.done: collections.deque[Pair] = collections.deque()
         self.pairs = 0
@@ -107,7 +157,8 @@ class Stereo:
         self._stop = threading.Event()
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
+        if self.bridge is None:
+            self._thread.start()
 
     def _run(self):
         asyncio.set_event_loop(self._loop)
@@ -130,6 +181,13 @@ class Stereo:
     def status(self) -> str:
         return " | ".join(f"{s}: {l.status}" for s, l in self.links.items())
 
+    def _trigger_bridge(self, pair: Pair):
+        # One bridge command: the bridge writes 0xB2 to both links back to back.
+        self.bridge.write(0b11, bytes([protocol.CMD_SNAPSHOT]))
+        t = time.monotonic()
+        pair.t_written = {"left": t, "right": t}
+        self.log("host", f"pair {pair.index}{' (warm-up)' if pair.warmup else ''}: 0xB2 sent to the bridge")
+
     def trigger(self, warmup: bool = False) -> bool:
         with self._lock:
             if self.pending is not None or not self.ready:
@@ -138,7 +196,10 @@ class Stereo:
             self.pending = Pair(self.pairs, warmup)
             for l in self.links.values():
                 l.fresh = False
-        asyncio.run_coroutine_threadsafe(self._trigger(self.pending), self._loop)
+        if self.bridge is not None:
+            self._trigger_bridge(self.pending)
+        else:
+            asyncio.run_coroutine_threadsafe(self._trigger(self.pending), self._loop)
         return True
 
     async def _trigger(self, pair: Pair):
@@ -177,7 +238,10 @@ class Stereo:
 
     def close(self):
         self._stop.set()
-        self._thread.join(timeout=5)
+        if self.bridge is not None:
+            self.bridge.close()
+        else:
+            self._thread.join(timeout=5)
 
 
 def to_image(frame: protocol.Frame, rotate: int) -> np.ndarray:
@@ -251,6 +315,9 @@ def main():
     ap.add_argument("--rotate-right", type=int, choices=sorted(ROTATIONS), help="degrees clockwise (default: BOARDS)")
     ap.add_argument("--flash", choices=["QQVGA", "QVGA", "VGA"],
                     help="first build and flash this mode to both boards (the mode is compile-time)")
+    ap.add_argument("--bridge", nargs="?", const="", default=None, metavar="PORT",
+                    help="use the BLE-USB bridge (COM port, default: found by USB VID)")
+    ap.add_argument("--interval-ms", type=float, default=15.0, help="with --bridge: connection interval")
     ap.add_argument("--height", type=int, default=640, help="display height of each picture (pixels)")
     ap.add_argument("--auto", type=int, default=0, help="take and save N pairs automatically, then quit")
     ap.add_argument("--interval", type=float, default=2.0, help="with --auto: seconds between pairs")
@@ -268,7 +335,7 @@ def main():
     if args.flash and not flash_boards(args.flash, boards, log):
         log.close()
         return 1
-    st = Stereo(log, boards)
+    st = Stereo(log, boards, args.bridge, args.interval_ms)
     h = args.height
     canvas = np.zeros((h, h * 3 // 2, 3), np.uint8)
     shown: Optional[tuple[Pair, dict[str, np.ndarray]]] = None  # pair on screen, its rotated pictures
