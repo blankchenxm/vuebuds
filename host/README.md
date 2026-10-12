@@ -2,6 +2,8 @@
 
 通过 BLE 实时接收 vuebuds 固件(设备名 `mustard`)发来的 HM01B0 图像,并在窗口里显示。
 
+双目图片 / 拼接 / VLM 的两个交互 DEMO：运行 `demo.ps1` 或 `python demo.py`，详见 [DEMO.md](DEMO.md)。
+
 ## 安装
 
 ```powershell
