@@ -30,4 +30,18 @@ bool cameraIsAsleep(void);                 // XSLEEP low and MCLK off
 void cameraArmSlot(uint32_t slot, uint8_t skipFrames);
 bool cameraSlotFrame(uint32_t slot, camera_frame_t *frame);
 
+/* Exposure registers (same addresses on both sensors: 0x0202/0x0203, 0x0205, 0x020E/0x020F). */
+typedef struct {
+  uint16_t integration;   // rows
+  uint8_t analog_gain;
+  uint16_t digital_gain;  // 0x020E << 8 | 0x020F
+} camera_exposure_t;
+
+bool cameraReadExposure(camera_exposure_t *exposure);  // I2C; false while asleep (S2) or off
+/* NULL: automatic exposure (AE). Otherwise AE off and these values (HM0360 only); applied now if
+ * the sensor is awake, else right after the next wake. */
+void cameraSetExposure(const camera_exposure_t *exposure);
+bool cameraExposureManual(void);
+void cameraReapplyExposure(void);  // manual and awake: write the fixed values again
+
 #endif

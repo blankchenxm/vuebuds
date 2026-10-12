@@ -1,9 +1,12 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <zephyr/kernel.h>
+
 #include "nrf_log.h"
 
 #include "ble.h"
+#include "image.h"
 #include "camera.h"
 #include "capture.h"
 #include "timers.h"
@@ -43,7 +46,7 @@ void snapshotRequest(void)
     m_started = true;
   } else {
     cameraArmSlot(SNAPSHOT_SLOT, 0);
-    if (m_s2) {
+    if (m_s2 && !cameraExposureManual()) {
       cameraWake();
     }
   }
@@ -68,13 +71,16 @@ void snapshotFrameDone(void)
     cameraArmSlot(SNAPSHOT_SLOT, 0);
     return;
   }
-  if (m_s2) {
+  if (ok) {
+    imagePrepare(&frame);  // exposure over I2C: before S2, which turns I2C off (~3 ms of the 13)
+  }
+  if (m_s2 && !cameraExposureManual()) {
     // Capture ends ~13 ms (VGA ~28 ms) before the frame boundary, where DPPI pulls XSLEEP low.
     cameraSleepOnFrameBoundary();
   }
   if (ok) {
     m_count++;
-    bleSendFrame(frame.pixels, frame.stride, frame.width, frame.height);
+    imageSend(&frame);
     NRF_LOG_RAW_INFO("%08d [snap] picture %u sent, %u ms after the request\n", systemTimeGetMs(), m_count,
                      systemTimeGetMs() - m_request_ms);
   }
@@ -85,6 +91,30 @@ void snapshotFrameDone(void)
 void snapshotAsleep(void)
 {
   cameraAsleep();
+}
+
+// The wake meters the scene and can overwrite the values written right after it (10-11: one
+// board read back integration 272 instead of 200): write them again once frames are flowing.
+#define SNAPSHOT_EXPOSURE_REWRITE_MS 300
+static void reapplyExposure(struct k_work *work)
+{
+  cameraReapplyExposure();
+}
+static K_WORK_DELAYABLE_DEFINE(reapplyWork, reapplyExposure);
+
+void snapshotExposureChanged(void)
+{
+  if (!m_started || !m_s2 || m_busy) {
+    return;  // applied when the sensor starts / after the picture in progress
+  }
+  if (cameraExposureManual()) {
+    cameraWake();  // writes the fixed values; the sensor streams from now on
+    k_work_reschedule(&reapplyWork, K_MSEC(SNAPSHOT_EXPOSURE_REWRITE_MS));
+    NRF_LOG_RAW_INFO("%08d [snap] manual exposure: sensor stays awake\n", systemTimeGetMs());
+  } else {
+    cameraSleepOnFrameBoundary();
+    NRF_LOG_RAW_INFO("%08d [snap] auto exposure: sensor sleeps between pictures again\n", systemTimeGetMs());
+  }
 }
 
 bool snapshotActive(void)
