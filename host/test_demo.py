@@ -4,6 +4,7 @@ import json
 import pathlib
 import tempfile
 import time
+import types
 import unittest
 from unittest.mock import patch
 
@@ -141,6 +142,31 @@ class DemoTests(unittest.TestCase):
             list(camera.capture("QVGA", "raw", "auto", time.monotonic()))
         self.assertFalse(camera.lock.locked())
         self.assertIsNone(camera.stereo)
+
+    def test_error_cleanup_drops_ble_links_before_closing_serial(self):
+        from unittest.mock import Mock
+        camera = core.Camera()
+        st = Mock()
+        camera.stereo = st
+        with patch.object(core.time, "sleep"):
+            camera.close(reset=True)
+        st.bridge.configure.assert_called_once_with([])
+        st.close.assert_called_once()
+        self.assertIsNone(camera.stereo)
+
+    def test_bridge_write_error_fails_without_waiting_for_frame_timeout(self):
+        from collections import deque
+        camera = core.Camera()
+        link = types.SimpleNamespace(write_results=[])
+        def trigger(**kwargs):
+            link.write_results.append((time.monotonic(), 0, -107))
+            return True
+        camera.stereo = types.SimpleNamespace(done=deque(), trigger=trigger, bridge=link, pending=None)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "桥转发"):
+                camera._take()
+        finally:
+            camera.stereo = None
 
 
 if __name__ == "__main__":

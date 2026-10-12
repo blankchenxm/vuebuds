@@ -18,12 +18,16 @@ SOURCES = [("左右两张原图", "pair"), ("拼接结果", "stitch")]
 TASKS = [("A · 详细描述 / 读取文字", "A"), ("B · 手持 / 触碰 / 指向的物品", "B")]
 
 
+def image_view(**kwargs):
+    return gr.Image(format="png", buttons=["fullscreen", "download"], **kwargs)
+
+
 def seconds(value):
     return "—" if value is None else f"{value:.3f} s"
 
 
 def stats_text(stats):
-    return (f"首字延迟 **{seconds(stats.get('ttft_s'))}** · "
+    return (f"{stats.get('model', '')} · 首字延迟 **{seconds(stats.get('ttft_s'))}** · "
             f"VLM 总耗时 **{seconds(stats.get('total_s'))}** · "
             f"输入 / 输出 token：{stats.get('prompt_tokens') or '—'} / {stats.get('completion_tokens') or '—'}"
             + (" · 已达到输出 token 上限，回答可能未完" if stats.get("finish_reason") == "length" else ""))
@@ -99,7 +103,9 @@ class Demo:
             delta = info["capture_delta_us"]
             out[2] = "\n".join(
                 f"{s}：请求→收齐 {info['frame_done_s'][s]:.3f} s；点击→收齐 {info['click_to_frame_s'][s]:.3f} s；"
-                f"{info['format'][s]} q{info['quality'][s]} / {info['bytes'][s]:,} B / 丢包 {info['lost_packets'][s]}"
+                f"{info['size'][s][0]}×{info['size'][s][1]} / {info['format'][s]}"
+                + (f" q{info['quality'][s]}" if info['format'][s] == 'jpeg' else '')
+                + f" / {info['bytes'][s]:,} B / 丢包 {info['lost_packets'][s]}"
                 for s in ("left", "right"))
             out[2] += f"\n收齐时间差：{info['arrival_delta_ms']:.1f} ms\n实际拍摄时间差：" + (
                 "未测（当前使用同时下命令方案 A，板端时钟未同步）" if delta is None else f"{delta} µs（共同时间基准）")
@@ -161,17 +167,17 @@ class Demo:
                         pair = gr.Dropdown([p.name for p in pairs], value=pairs[0].name if pairs else None, label="图片对")
                         refresh = gr.Button("刷新数据集")
                         with gr.Row():
-                            left = gr.Image(label="左相机", interactive=False, height=280)
-                            right = gr.Image(label="右相机", interactive=False, height=280)
+                            left = image_view(label="左相机", interactive=False, height=280)
+                            right = image_view(label="右相机", interactive=False, height=280)
                         caption = gr.Textbox(label="图片信息", interactive=False, lines=2)
                     with gr.Column(scale=1, min_width=280):
                         gr.Markdown("### 2 · 比较拼接")
                         method = gr.Dropdown(stitch.DEFAULT_METHODS, value="sift", label="拼接方法")
                         recalc = gr.Button("重新计算当前方法")
-                        pano = gr.Image(label="拼接结果", interactive=False, height=280)
+                        pano = image_view(label="拼接结果", interactive=False, height=280)
                         detail = gr.Textbox(label="拼接状态 / 内点 / 耗时", interactive=False, lines=5)
                         with gr.Accordion("查看匹配连线", open=False):
-                            matches = gr.Image(label="匹配点", interactive=False)
+                            matches = image_view(label="匹配点", interactive=False)
                     with gr.Column(scale=1, min_width=320):
                         gr.Markdown("### 3 · 实时请求 VLM")
                         source = gr.Radio(SOURCES, value="pair", label="输入图像")
@@ -217,12 +223,12 @@ class Demo:
                     with gr.Column(scale=1, min_width=280):
                         gr.Markdown("### 1 · 左右相机")
                         with gr.Row():
-                            live_left = gr.Image(label="实时左图", interactive=False, height=280)
-                            live_right = gr.Image(label="实时右图", interactive=False, height=280)
+                            live_left = image_view(label="实时左图", interactive=False, height=280)
+                            live_right = image_view(label="实时右图", interactive=False, height=280)
                         timing = gr.Textbox(label="收图耗时 / 格式 / 大小", lines=6, interactive=False)
                     with gr.Column(scale=1, min_width=280):
                         gr.Markdown("### 2 · 自动拼接")
-                        live_pano = gr.Image(label="自动拼接结果", height=280, interactive=False)
+                        live_pano = image_view(label="自动拼接结果", height=280, interactive=False)
                         stitch_log = gr.Textbox(label="选择过程 / 拼接耗时", lines=6, interactive=False)
                         gr.Markdown("SIFT → ASIFT → ORB：采用首个通过内点数与几何检查的结果；全部失败则将两张原图送给 VLM。")
                     with gr.Column(scale=1, min_width=320):
@@ -232,12 +238,15 @@ class Demo:
                         live_stats = gr.Markdown()
                 timeline = gr.Markdown("等待拍摄。首次连接及预热会单独计时。")
                 saved = gr.Textbox(label="保存位置", interactive=False)
+                live_outputs = [live_left, live_right, timing, live_pano, stitch_log, live_prompt,
+                                live_answer, live_stats, timeline, saved]
                 capture.click(self.live, [mode, fmt, exposure, live_model, live_task, live_source, learned],
-                              [live_left, live_right, timing, live_pano, stitch_log, live_prompt,
-                               live_answer, live_stats, timeline, saved], **common)
+                              live_outputs, **common)
                 flash.click(self.flash, mode, flash_log, **common)
-                for component in (live_task, live_source):
-                    component.change(vlm.prompt_text, [live_task, live_source], live_prompt, **common)
+                for component in (mode, fmt, exposure, live_model, live_task, live_source, learned):
+                    component.change(lambda t, s: (None, None, "", None, "", vlm.prompt_text(t, s),
+                                                   "", "", "设置已改变，请重新拍摄。", ""),
+                                     [live_task, live_source], live_outputs, **common)
             gr.Markdown(f"数据目录：`{self.captures}` · 所有图像按原生像素传入模型。")
         return app.queue(default_concurrency_limit=1, max_size=16)
 

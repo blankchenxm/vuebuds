@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import cv2
 import numpy as np
 
+import bridge
 import protocol
 import stitch
 import stereo
@@ -171,8 +172,16 @@ class Camera:
         self.log_lines.append(f"[{side}] {message}")
         self.log_lines[:] = self.log_lines[-60:]
 
-    def close(self):
+    def close(self, reset=False):
         if self.stereo is not None:
+            if reset:
+                try:
+                    # Closing the COM port alone leaves the BLE links and pending capture alive.
+                    # Drop both links before a retry so delayed old frames cannot become a new pair.
+                    self.stereo.bridge.configure([])
+                    time.sleep(0.2)
+                except Exception:
+                    pass  # An unplugged serial port must not prevent local resource cleanup.
             self.stereo.close()
             self.stereo = None
         self.settings = None
@@ -180,10 +189,14 @@ class Camera:
     def _take(self, warmup=False):
         st = self.stereo
         st.done.clear()
+        requested = time.monotonic()
         if not st.trigger(warmup=warmup):
             raise RuntimeError("无法触发拍摄；请检查双板连接。")
         deadline = time.monotonic() + 45
         while time.monotonic() < deadline:
+            errors = [(slot, err) for stamp, slot, err in st.bridge.write_results if stamp >= requested and err]
+            if errors:
+                raise RuntimeError(f"桥转发拍照命令失败：{errors}")
             if st.done:
                 pair = st.done.popleft()
                 if any(f.lost_packets for f in pair.frames.values()):
@@ -191,10 +204,12 @@ class Camera:
                 return pair
             if not st.ready:
                 raise RuntimeError("拍摄时开发板断开，请检查 USB 和 BLE。")
-            if st.pending is None:
+            if st.pending is None and not st.done:
                 raise RuntimeError("拍照命令失败，请重新连接。")
             time.sleep(0.03)
-        raise TimeoutError("双板收图超时（45 秒），连接已关闭，可重新拍摄。")
+        pending = st.pending
+        missing = [s for s in stereo.SIDES if s not in pending.frames] if pending else list(stereo.SIDES)
+        raise TimeoutError(f"双板收图超时（45 秒），未收到 {', '.join(missing)}；请检查对应传感器连接。")
 
     def capture(self, mode, fmt, exposure, clicked):
         """Yield progress strings, then (images, timing metadata)."""
@@ -207,6 +222,9 @@ class Camera:
                 raise RuntimeError("上次双板烧录未完成，请先重新烧录两块板。")
             if self.stereo is None:
                 yield "正在连接 BLE-USB 桥和两块相机板…"
+                # A previous CLI/DEMO may have left streaming or an unfinished request on the bridge.
+                # Start a fresh camera session, then keep it open across subsequent pictures.
+                bridge.release(self.port or None)
                 self.stereo = stereo.Stereo(self.log, BOARDS, bridge_port=self.port)
             st = self.stereo
             deadline = time.monotonic() + 35
@@ -236,7 +254,7 @@ class Camera:
             images = {s: stereo.to_image(f, protocol.BOARDS[BOARDS[s]]["rotate"]) for s, f in pair.frames.items()}
             yield images, pair_info(pair, clicked)
         except BaseException:
-            self.close()  # Never reuse an incomplete request or receive a stale frame as a new pair.
+            self.close(reset=True)
             raise
         finally:
             self.lock.release()
