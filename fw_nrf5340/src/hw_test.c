@@ -817,8 +817,59 @@ static void quadDiag(void)
   }
 }
 
+/*
+ * Quad with softer nRF edges (2026-10-14): drive of SCK / CE# and of SIO0-3 per case, 64 KB
+ * single write -> quad read and quad write -> single read. The APS6404L's own output drive is
+ * fixed (50 ohm), so reads can only change through our side's pull / input settings.
+ */
+static void setDrive(uint32_t pin, nrf_gpio_pin_drive_t drive)
+{
+  NRF_P0->PIN_CNF[pin] = (NRF_P0->PIN_CNF[pin] & ~GPIO_PIN_CNF_DRIVE_Msk) | ((uint32_t)drive << GPIO_PIN_CNF_DRIVE_Pos);
+}
+
+static void quadDrive(uint8_t mhz, nrf_gpio_pin_drive_t clk, nrf_gpio_pin_drive_t data, const char *name)
+{
+  uint32_t fb;
+  configure(false, 48, TEST_BURST);
+  writeRegion(0, 64 * 1024, 0xD00D + mhz);
+  configure(true, mhz, TEST_BURST);
+  setDrive(17, clk);
+  setDrive(18, clk);
+  for (int pin = 13; pin <= 16; pin++) {
+    setDrive(pin, data);
+  }
+  uint32_t rBad = verifyRegion(0, 64 * 1024, 0xD00D + mhz, &fb);
+  bool wOk = writeRegion(0, 64 * 1024, 0xF00D + mhz);
+  configure(false, 48, TEST_BURST);
+  uint32_t wBad = wOk ? verifyRegion(0, 64 * 1024, 0xF00D + mhz, &fb) : UINT32_MAX;
+  printk("[hwtest]   quad %2u MHz, %-26s quad read %5u bad, quad write %5u bad (of 65536)\n", mhz, name, rBad, wBad);
+}
+
+static void quadDriveSweep(void)
+{
+  static const struct {
+    nrf_gpio_pin_drive_t clk, data;
+    const char *name;
+  } cases[] = {{NRF_GPIO_PIN_H0H1, NRF_GPIO_PIN_H0H1, "SCK/CE# H0H1, SIO H0H1"},
+               {NRF_GPIO_PIN_H0H1, NRF_GPIO_PIN_S0S1, "SCK/CE# H0H1, SIO S0S1"},
+               {NRF_GPIO_PIN_S0S1, NRF_GPIO_PIN_S0S1, "SCK/CE# S0S1, SIO S0S1"},
+               {NRF_GPIO_PIN_S0S1, NRF_GPIO_PIN_H0H1, "SCK/CE# S0S1, SIO H0H1"}};
+  static const uint8_t mhz[] = {8, 32};
+  for (int f = 0; f < ARRAY_SIZE(mhz); f++) {
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+      quadDrive(mhz[f], cases[i].clk, cases[i].data, cases[i].name);
+    }
+  }
+  configure(PSRAM_DEFAULT_QUAD, PSRAM_DEFAULT_MHZ, PSRAM_DEFAULT_BURST);
+}
+
 static void testPsram(void)
 {
+#ifdef HW_TEST_QUAD_DRIVE  // -Cflags 'HW_TEST;HW_TEST_PSRAM_ONLY;HW_TEST_QUAD_DRIVE'
+  configure(false, 8, TEST_BURST);
+  quadDriveSweep();
+  return;
+#endif
   char detail[160];
   cycleCounterOn();
   psramWires();
