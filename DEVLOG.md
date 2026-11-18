@@ -5,7 +5,7 @@
 
 ---
 
-## 2026-11-17 · CLAUDE.md 加入工作台协作规则(PR #?,Issue #48)
+## 2026-11-17 · CLAUDE.md 加入工作台协作规则(PR #49,Issue #48)
 
 - **阶段**:文档
 - **改了什么**:`CLAUDE.md` 开头加"工作台(跨模块协作)"一节,内容来自工作台仓库 `snippets/module-claude-md-block.md`:本仓库 = 固件(fw)模块,会话名 `fw-win`,任务标签 `needs:fw`,工作台本机 clone 在 `D:\Projects\Proactive camera agent\proactive-av-agent-hub`。
