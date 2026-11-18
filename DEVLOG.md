@@ -5,6 +5,15 @@
 
 ---
 
+## 2026-11-17 · CLAUDE.md 加入工作台协作规则(PR #?,Issue #48)
+
+- **阶段**:文档
+- **改了什么**:`CLAUDE.md` 开头加"工作台(跨模块协作)"一节,内容来自工作台仓库 `snippets/module-claude-md-block.md`:本仓库 = 固件(fw)模块,会话名 `fw-win`,任务标签 `needs:fw`,工作台本机 clone 在 `D:\Projects\Proactive camera agent\proactive-av-agent-hub`。
+- **为什么**:四个模块仓库(vuebuds、kicad-agent-flow、数据 / 模型、Mac 管线)改成在工作台仓库 `blankchenxm/proactive-av-agent-hub` 里协作(见其 `COLLAB.md`):开工前看 `STATUS.md` 和 `needs:fw` 的 Issue,交接走 `handoff` Issue,跨模块接口先改 `INTERFACES.md`。
+- **和原代码的行为差异**:无(只改文档)。
+- **验证**:无需上板。
+- **遗留 / 下一步**:跨机器会话消息(Remote Control)还没在三台机器上实测(`COLLAB.md` §6 第 4 步)。
+
 ## 2026-10-11 · 板上压缩(JPEG / PNG)+ PSRAM 驱动 + 压缩测试命令(PR #44,Issue #43)
 
 - **阶段**:硬件优化计划阶段 3(压缩)+ PSRAM P2(驱动,用作编码输出)
