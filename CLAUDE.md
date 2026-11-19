@@ -8,7 +8,8 @@
 ## 工作台（跨模块协作）
 
 这个仓库是 Proactive A-V agent 的 固件（fw） 模块。系统主线、模块之间的接口、整体进度在工作台仓库
-`blankchenxm/proactive-av-agent-hub`，本机的 clone 在 `D:\Projects\Proactive camera agent\proactive-av-agent-hub`。本会话的名字是 `fw-win`。
+`blankchenxm/proactive-av-agent-hub`，本机(MacBook)的 clone 在 `~/Documents/Research Projects/trigger A-V agent/proactive-av-agent-hub`。本会话的名字是 `fw-mac`
+(2026-11-18 从 Windows 的 `fw-win` 搬过来,hub #14;两块 5340 DK 和桥插在这台 Mac 上)。
 
 - 开工前：在工作台仓库 `git pull`，读 `STATUS.md` 里本模块的部分；
   `gh issue list --repo blankchenxm/proactive-av-agent-hub --label needs:fw --state open`。
@@ -54,11 +55,21 @@
 - `fw/sdk/`:整份 SDK(已打好 `sdk_patch/nrfx_spis*` 补丁);`fw/_build/` 是作者在 macOS 上的编译产物,不要改;Windows 编译输出在 `fw/_build_win/`(已 gitignore)。
 - `fw/wiring_test.c`:HM0360 接线 / 状态检测工具(`CFLAGS=-DWIRING_TEST` 才编译,开机等 RTT 接上后逐项打印 PASS/FAIL),换模块、怀疑接线时先跑它。
 - `fw_nrf5340/`:nRF5340 DK 版(NCS v3.2.1 / Zephyr,sysbuild:应用核 + 网络核 `ipc_radio`)。直接编译 `../fw/sensors/`(不复制),`src/compat/` 提供驱动用到的 nRF5 SDK 头文件;`src/capture/` 是 DPPI 版硬件片选;`src/camera.c`、`src/monitor.c` 从 `fw/` 移植;`src/ble.c` 协议和 `fw/` 相同。说明见 `fw_nrf5340/README.md`。
-- `fw_bridge/`:BLE-USB 桥(NCS v3.2.1,52840 DK,以后换 5340 只换编译目标):BLE 中心设备同时连两块相机板,通知经 USB CDC ACM(DK 侧面 nRF USB 口)转给电脑。`tools/bridge.ps1 flash|build|rtt`;协议和实测见 `fw_bridge/README.md`,电脑端 `host/bridge.py`(`stereo.py --bridge`、`ble_bench.py --bridge --board A B`)。
+- `fw_bridge/`:BLE-USB 桥(NCS v3.2.1,52840 DK,以后换 5340 只换编译目标):BLE 中心设备同时连两块相机板,通知经 USB CDC ACM(DK 侧面 nRF USB 口)转给电脑。`tools/bridge_fw.py flash|build|rtt`;协议和实测见 `fw_bridge/README.md`,电脑端 `host/bridge.py`(`stereo.py --bridge`、`ble_bench.py --bridge --board A B`)。
 - `host/`:电脑端 `viewer.py`(BLE 实时预览,空格存图,`--rtt --reset` 合并固件日志);`stereo.py`(两块 5340 板空格同时拍一对、旋转后左右并排显示,S 存到 `captures/stereo/`);`stitch.py`(离线对存下的对做两种拼接并显示:`python stitch.py captures/stereo/<一对>`,左边原图、右边拼接结果;`--no-show` 批量统计)。`host/protocol.py` 的 `BOARDS` 有四块板:`hm0360`、`hm01b0` 是 52840,`hm0360-5340`、`hm0360b-5340` 是 5340(两块都接 HM0360)。
 - `hw/`:KiCad 硬件。**用户可能有未提交的 KiCad 改动和锁文件,不要提交、不要还原。**
 
-## 环境与命令(Windows)
+## 环境与命令(MacBook,2026-11-18 起)
+
+- NCS v3.2.1:`nrfutil sdk-manager install v3.2.1`,装在 `/opt/nordic/ncs`(`v3.2.1/`、`toolchains/322ac893fe/`);nrfutil 在 `~/.local/bin`(装了 `sdk-manager`、`device`)。
+- 脚本(Python,标准库,Mac / Windows 都能跑):`fw_nrf5340/tools/dk5340.py`、`fw_bridge/tools/bridge_fw.py`,公共代码 `tools/devtools.py`(找 NCS、J-Link、复位、RTT、空格路径)。原来的 `dk5340.ps1` / `bridge.ps1` 已删。
+- J-Link V9.96 在 `/Applications/SEGGER/JLink`(`JLinkExe`、`JLinkRTTLoggerExe`;`JLINK_DIR` 可覆盖)。**Mac 上没有 nrfjprog**:复位 / 烧录用 `nrfutil device` / `west flash --runner nrfutil`。
+- 仓库路径有空格:脚本经符号链接 `~/.cache/vuebuds-src/<hash>` 编译(相当于 Windows 的 `subst V:`)。
+- `host/.venv`:Python 3.12(`uv venv --python 3.12`),`requirements.txt`。
+- **macOS 的 bleak 拿不到 BLE 地址**:直连前先 `host/.venv/bin/python host/ble_identify.py`(J-Link 暂停每块板的网络核,看哪个 `mustard` 消失),结果在 `host/boards.local.json`(gitignore);经桥不受影响。
+- 11-18 J-Link V9.96 第一次连两块 5340 DK 时自动升级了板载 J-Link 固件(Jul 2025 → Jun 2026),第一次失败、第二次成功;桥那块 DK 没升。
+
+## 旧 Windows 环境(fw-win,2026-11-18 退役,留作参考)
 
 | 工具 | 位置 |
 |---|---|
@@ -86,14 +97,14 @@
 
 ## nRF5340(fw_nrf5340/)
 
-- 环境:NCS v3.2.1 + 工具链装在 `D:\NRFSDK`(`v3.2.1/`、`toolchains/66cdf9b75e/`)。PowerShell 用 `fw_nrf5340\tools\dk5340.ps1`(自己设环境变量,结束后还原);bash 用 `source fw_nrf5340/tools/ncs_env.sh`。
-- 常用(在 `fw_nrf5340/` 下):`.\tools\dk5340.ps1 run [-Board HM0360|HM0360B] [-Mode QQVGA] [-ColorBar] [-Monitor] [-PeriodMs 0] [-Cflags 'A=1;B'] [-Pristine] [-Seconds N]`;`build` / `flash` / `rtt` 单独用。viewer:`--board hm0360-5340|hm0360b-5340`。
+- 环境:见上面"环境与命令(MacBook)";Windows 旧安装在 `D:\NRFSDK`(`toolchains/66cdf9b75e/`),`dk5340.py` 在 Windows 上仍按这个找(`NCS_DIR` 可覆盖)。手动用 west:`source fw_nrf5340/tools/ncs_env.sh`。
+- 常用(在 `fw_nrf5340/` 下):`python3 tools/dk5340.py run [--board HM0360|HM0360B] [--mode QQVGA] [--color-bar] [--monitor] [--period-ms 0] [--cflags 'A=1;B'] [--pristine] [--seconds N]`;`build` / `flash` / `rtt` / `camera` 单独用。viewer:`--board hm0360-5340|hm0360b-5340`。
 - 设备(2026-10-07 起两块都接 HM0360):`HM0360` 板 J-Link SN `1050035314`、BLE `DA:E7:DE:69:E3:5E`;`HM0360B` 板 SN `1050017384`、BLE `EA:F1:6D:2A:C0:BB`(10-06 前接的是 HM01B0);芯片 nRF5340 **REV1**。RTT / JLink 器件名 `nRF5340_xxAA_APP`,nrfjprog `-f nrf53`。
 - 接线(和 52840 的差别):FVLD → **P1.09**、LVLD → **P1.10**、片选回环跳线 **P1.06 → P1.07**;其余(PCLK P1.02、D0 P1.03、MCLK P1.08、XSLEEP P1.04、RST P1.05、I2C P0.26 / P0.27)不变。引脚在 `src/pins.h`,I2C 在 `boards/nrf5340dk_nrf5340_cpuapp.overlay`。
 - 外设占用:TIMER0 = MCLK、TIMER1 = 数行、TIMER2 = CS 脉冲、EGU0 = FVLD 分发、DPPI 通道 16–24 / 组 3–5、SPIS2(寄存器级)、TWIM1、RTC0 = 压力测试。应用核只有 TIMER0–2、RTC0–1(RTC1 是内核时钟)。
 - 坑:
-  - **仓库路径有空格,Zephyr 设备树预处理会失败**:`dk5340.ps1` 用 `subst V:` 把仓库映射成 `V:\`,编译目录是 `V:\fw_nrf5340\build_<变体>`(已 gitignore)。目录联接(junction)不行,CMake 会解析回真实路径。
-  - **sysbuild 下 `-DCAM_MODE=…` 传不到应用镜像**:要写 `-Dfw_nrf5340_CAM_MODE=…`,CMakeLists 里用 `zephyr_get(... SYSBUILD LOCAL)` 读(`dk5340.ps1` 已处理)。新加 `.conf` / overlay 文件后要 `-Pristine`,否则不生效(网络核配置因此没生效过,一帧要传 12 s)。
+  - **仓库路径有空格,Zephyr 设备树预处理会失败**:`dk5340.py` 在 Windows 用 `subst V:`(编译目录 `V:\fw_nrf5340\build_<变体>`),Mac 用符号链接 `~/.cache/vuebuds-src/<hash>`(已 gitignore)。Windows 目录联接(junction)不行,CMake 会解析回真实路径。
+  - **sysbuild 下 `-DCAM_MODE=…` 传不到应用镜像**:要写 `-Dfw_nrf5340_CAM_MODE=…`,CMakeLists 里用 `zephyr_get(... SYSBUILD LOCAL)` 读(`dk5340.py` 已处理)。新加 `.conf` / overlay 文件后要 `--pristine`,否则不生效(网络核配置因此没生效过,一帧要传 12 s)。
   - **SPIS DMA 起始地址必须 4 字节对齐**(52840 不需要):`frame_pool_init(frame_bytes, dma_offset)` 把槽前移 0–3 字节。
   - **SPIS 用模式 1(PCLK 下降沿采样)**,两颗传感器都是(用户 10-06 选方案 A;`fw/` 是模式 0)。模式 0 时 HM0360 实景全是随机噪点,而彩条干净:**彩条位翻转少,不能用来证明采样边沿没问题**,要看实景。
   - **VGA(只 HM0360、只 5340)**(用户 10-07 要求):`-Mode VGA`,不子采样,行长 768、帧长 516(帧周期 396 ms),DMA 5 段 × `61440`;推流约 4 s 一帧(1270 包);Monitor 只存 1 个槽(用户同意),默认周期 1000 ms(每次唤醒 MCLK 开约 685 ms,500 ms 会一半 overrun)。`fw/` 不编 VGA。
@@ -106,7 +117,7 @@
   - 新板出厂开着 APPROTECT,第一次要 `nrfjprog --recover`(两块都已做)。
   - PowerShell 里别把 `dk5340.ps1 flash` 的输出接到 `Select-Object -First N`:管道提前结束会杀掉 west,结果只烧了网络核、没烧应用核。
   - **HM0360B 板 VGA 偶发 `OVERFLOW, BAD`,每段字节数都对**(10-08,拍照命令下 25 张里 5 张;HM0360 板和 QVGA 没见过),根因未查。0xB2 会自动重拍;推流时这一帧被丢掉。
-  - 双板拍照时抓 RTT:不要用 `dk5340.ps1 rtt`(会复位板子),直接起 `JLinkRTTLogger -USB <SN>` 附着,`stereo.py` 照常连。
+  - 双板拍照时抓 RTT:不要用 `dk5340.py rtt`(会复位板子),直接起 `JLinkRTTLogger -USB <SN>` 附着,`stereo.py` 照常连。
 
 ## 桥(fw_bridge/)和新硬件(2026-10-10 起)
 
@@ -115,7 +126,7 @@
 - 桥:默认间隔 15 ms(双板时 10 / 30 ms 两条连接不均衡);两块板合计约 110–116 KB/s 是桥这边的上限。相机板同时只接受一个连接:桥插着时 Windows 直连工具要先 `python bridge.py --release`(`ble_bench.py` 直连模式会自动做)。
 - 桥连上后的 PHY / 数据长度 / MTU / 发现服务**不能在 connected 回调(BT RX 线程)里调用**,会死锁并断言 `Controller unresponsive`;放到工作队列。
 - sysbuild 下给桥传选项要写 `-Dfw_bridge_<NAME>`(和 `fw_nrf5340` 一样)。
-- 仓库路径有空格时脚本用 `subst V:`;**git worktree 放在没有空格的路径**(如 `D:\Projects\vuebuds_wt`)时 `dk5340.ps1` / `bridge.ps1` 原地编译。
+- 仓库路径有空格时脚本用 `subst V:`;**git worktree 放在没有空格的路径**(如 `D:\Projects\vuebuds_wt`)时 `dk5340.py` / `bridge_fw.py` 原地编译。
 
 ## 已知坑
 

@@ -5,6 +5,33 @@
 
 ---
 
+## 2026-11-18 · 固件开发搬到 MacBook:跨平台脚本 + macOS BLE(PR #?,Issue #50)
+
+- **阶段**:工具(工作台 hub #14,fw-win → fw-mac)
+- **改了什么**:
+  - `tools/devtools.py`(新):找 NCS v3.2.1(`nrfutil sdk-manager toolchain env`,否则 `NCS_DIR` / `D:\NRFSDK` + 工具链 `66cdf9b75e`)、空格路径(Windows `subst V:`,Mac 符号链接 `~/.cache/vuebuds-src/<hash>`,**源码目录要显式传给 west**,传 `.` 会被 getcwd 解析回带空格的真实路径)、J-Link 工具(`JLINK_DIR`,否则 `/Applications/SEGGER/JLink` 或 `C:\Program Files\SEGGER\JLink`)、复位(有 nrfjprog 用它,否则 `nrfutil device reset`)、RTT。
+  - `fw_nrf5340/tools/dk5340.py`(新,替代 `dk5340.ps1`,已删):`build / flash / rtt / run / camera`,参数同原脚本(`--board --mode --color-bar --monitor --period-ms --cflags --pristine --seconds`),编译目录名不变;`camera` = 复位 + `viewer.py --rtt --reset` + 截图。
+  - `fw_bridge/tools/bridge_fw.py`(新,替代 `bridge.ps1`,已删):`build / flash / rtt`。
+  - `host/`:`viewer.py`、`ble_bench.py`、`codec_bench.py` 的 J-Link 路径和复位改用 `devtools`;`stereo.py --flash` 调 `dk5340.py`;`protocol.ble_target()`:Windows / Linux 照旧按 MAC 连,**macOS 按本机 UUID**(`boards.local.json`,gitignore);`ble_identify.py`(新)认板子。`requirements.txt` 加 `pyserial`。
+  - `fw_nrf5340/tools/ncs_env.sh` 支持 macOS;README(`fw_nrf5340`、`fw_bridge`、`host`)和 `CLAUDE.md`(会话名 `fw-mac`、Mac 环境一节)更新。
+- **为什么**:Xiaomeng 11-18 在 hub 定:固件开发搬到 MacBook,"改固件 → 烧录 → Mac 客户端验证"在一台机器上闭环;脚本两边都要能跑。
+- **和原代码的行为差异**(固件没改):
+  - **RTT 不再用 JLinkRTTLogger**:V9.96 在 Mac 上对 nRF5340 一直报 `RTT Control Block not found`(加 `-RTTAddress 0x20001010` 也一样),而 J-Link Commander 能找到。改成 Commander 连上(不暂停 CPU)+ 读它的 RTT telnet 端口(每个实例一个空闲端口,两块板可同时抓),Windows 上也走这条路。日志文件内容相同(去掉 telnet 开头的横幅行)。
+  - 本工具开的 J-Link 会话都 `exec DisableAutoUpdateFW`(见下面板载 J-Link 固件升级)。
+  - Mac 上没有 nrfjprog:复位用 `nrfutil device reset`,烧录 `west flash --runner nrfutil`(有 nrfjprog 时仍用 nrfjprog;`WEST_RUNNER` 可改)。
+  - 桥的烧录从 `nrfjprog --program merged.hex --sectorerase --verify --reset` 改成 `west flash`(同样只擦固件占用的扇区、校验、复位)。
+  - 脚本参数从 PowerShell 风格(`-Mode`)变成 `--mode`。
+- **验证**(MacBook,M 系列,macOS 26):
+  - 编译(同 `fb6b10e` 的固件源码,`--pristine`)和 Windows 基线(hub #13)**逐字节一致**:QVGA / VGA 应用核 FLASH 158216 B、RAM 55508 B;网络核 171352 B / 45416 B;桥 181996 B / 93552 B。
+  - 两块 5340 板按 SN 烧录(`nrfutil`,两核都校验通过);RTT:两块板都抓到开机日志(地址 `DA:E7:DE:69:E3:5E`、`EA:F1:6D:2A:C0:BB` 与原来一致),桥也抓到。
+  - `ble_identify.py` 认出两块板的 UUID(一次通过)。
+  - `dk5340.py camera`(viewer,QVGA 推流 20 s):两块板各 20 帧、0 丢包、每帧 DMA `38400 38400`,约 1.2 fps(Windows 直连约 1 fps)。
+  - `stereo.py --flash QVGA --auto 3`:先经 `dk5340.py` 给两块板各烧一次(约 39 s / 块),再拍 3 对、全部保存、0 丢包。左板每张约 4.7 s、右板约 0.8 s(Mac 给两条连接的间隔不同,和 Windows 双连时的不均衡类似;桥模式不受影响)。
+  - 桥:见遗留。
+- **遗留 / 下一步**:
+  - J-Link V9.96 第一次连两块 5340 DK 时自动升级了板载 J-Link 固件(Jul 2025 → Jun 2026):第一次连 HM0360 板时失败(bootloader 超时),第二次成功;HM0360B 板第一次连上时已经停在 bootloader,随后升级成功。两块现在都正常。桥那块 DK 没升(之后的会话都禁止自动升级)。
+  - `fw/`(52840 旧固件,Makefile)、`fw/tools/dk.ps1`、`codec_test`(MinGW)没有移植,Mac 上暂不能用。
+
 ## 2026-11-17 · CLAUDE.md 加入工作台协作规则(PR #49,Issue #48)
 
 - **阶段**:文档
