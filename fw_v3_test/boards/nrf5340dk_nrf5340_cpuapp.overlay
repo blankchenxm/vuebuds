@@ -1,0 +1,52 @@
+/*
+ * balsamic3 (V3) on the nrf5340dk/nrf5340/cpuapp target. The ISP2053 module differs from
+ * the DK in three ways that matter here:
+ * - 32.768 kHz crystal: load capacitors are inside the module; ISP2053 DS R11 p.8 says
+ *   XOSC32KI.INTCAP must select "External" (the DK uses internal 7 pF).
+ * - Supply: VDD and VDDH are tied together (normal mode, DCCH open, no inductor), so the
+ *   VDDH regulator is not used. The module integrates the main DC/DC inductors.
+ * - P0.13-P0.18 carry the APS6404L PSRAM, not the DK's QSPI NOR flash; src/main.c drives
+ *   it with SPIM4 at register level, so the qspi and spi4 nodes stay disabled.
+ * PMIC (0x48) and camera (0x24) share TWIM1 on P0.26 SDA / P0.27 SCL, 4.7 kOhm to +1V8.
+ */
+&lfxo {
+	load-capacitors = "external";
+	/delete-property/ load-capacitance-picofarad;
+};
+
+&vregh {
+	status = "disabled";
+};
+
+&qspi {
+	status = "disabled";
+};
+
+&spi4 {
+	status = "disabled";
+};
+
+&pinctrl {
+	i2c1_v3_default: i2c1_v3_default {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 0, 26)>,
+				<NRF_PSEL(TWIM_SCL, 0, 27)>;
+		};
+	};
+
+	i2c1_v3_sleep: i2c1_v3_sleep {
+		group1 {
+			psels = <NRF_PSEL(TWIM_SDA, 0, 26)>,
+				<NRF_PSEL(TWIM_SCL, 0, 27)>;
+			low-power-enable;
+		};
+	};
+};
+
+&i2c1 {
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_STANDARD>;
+	pinctrl-0 = <&i2c1_v3_default>;
+	pinctrl-1 = <&i2c1_v3_sleep>;
+	pinctrl-names = "default", "sleep";
+};

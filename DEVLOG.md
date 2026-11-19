@@ -5,6 +5,15 @@
 
 ---
 
+## 2026-11-18 · balsamic3(V3)上板测试固件 fw_v3_test 进 git(PR #?,工作台 Issue #13)
+
+- **阶段**:工具 / 新硬件
+- **改了什么**:`fw_v3_test/`(新,11-15 在 Windows 上写、之前没进 git):`src/main.c`(V3 上板自检:MAX77650 PMIC、APS6404L PSRAM、HM0360 I2C / MCLK、LED、电源键,RTT 逐项 PASS / FAIL)、`boards/nrf5340dk_nrf5340_cpuapp.overlay`(DK 设备树改成 ISP2053 模块)、`boards/v3_module.overlay`(给别的程序叠加用,例如在 V3 上跑 `fw_nrf5340`)、`tools/v3test.ps1`(编译 / 烧录 / RTT)、`.gitignore`(`build*/`、`build_logs/`)。
+- **为什么**:固件开发搬到 MacBook(工作台 Issue #13 / #14,用户 11-18),Mac 只能从 GitHub 拉代码。
+- **和原代码的行为差异**:无(新目录,不改 `fw/`、`fw_nrf5340/`)。
+- **验证**:只提交 11-15 在 V3 板上跑过的源码,这次没有重新上板。
+- **遗留 / 下一步**:`v3test.ps1` 只能在 Windows 上用,Mac 上要改(工作台 #14)。
+
 ## 2026-11-17 · CLAUDE.md 加入工作台协作规则(PR #49,Issue #48)
 
 - **阶段**:文档
