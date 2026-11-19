@@ -5,7 +5,7 @@
 
 ---
 
-## 2026-11-18 · 固件开发搬到 MacBook:跨平台脚本 + macOS BLE(PR #?,Issue #50)
+## 2026-11-18 · 固件开发搬到 MacBook:跨平台脚本 + macOS BLE(PR #51,Issue #50)
 
 - **阶段**:工具(工作台 hub #14,fw-win → fw-mac)
 - **改了什么**:
