@@ -27,7 +27,8 @@
   - `ble_identify.py` 认出两块板的 UUID(一次通过)。
   - `dk5340.py camera`(viewer,QVGA 推流 20 s):两块板各 20 帧、0 丢包、每帧 DMA `38400 38400`,约 1.2 fps(Windows 直连约 1 fps)。
   - `stereo.py --flash QVGA --auto 3`:先经 `dk5340.py` 给两块板各烧一次(约 39 s / 块),再拍 3 对、全部保存、0 丢包。左板每张约 4.7 s、右板约 0.8 s(Mac 给两条连接的间隔不同,和 Windows 双连时的不均衡类似;桥模式不受影响)。
-  - 桥:见遗留。
+  - 经桥(11-19,桥 DK 的 nRF USB 口接到 Mac 后出现 `/dev/cu.usbmodem1101`,VID 0x2FE3 "VueBuds bridge"):`stereo.py --bridge --auto 3` 两块板都经桥连上(间隔 15 ms、PHY 2M、MTU 498),拍 4 对(第 1 对预热)、存 3 对、0 丢包,每张约 1.5 s,左右一致;`ble_bench.py --bridge --board hm0360-5340 hm0360b-5340 --duration 30` 两块板 0.77 / 0.80 fps、58 / 60 KB/s(合计 118 KB/s,和 PR #40 的桥上限 110–116 KB/s 一致)、0 丢包、固件 0 坏帧;`bridge.py --stream` 两块板各 7 帧 / 10 s。
+  - 注意:`bridge.py --stream` 前板子这次开机要没用过 0xB2(固件一次开机只接受 0xB1 / 0xB2 其中一种),也不要刚用 `nrfutil` 复位完就跑(旧连接要 4 s 才超时,`wait_ready` 会把它当成已就绪),否则收到 0 帧;`ble_bench.py` 自己处理了这两点。
 - **遗留 / 下一步**:
   - J-Link V9.96 第一次连两块 5340 DK 时自动升级了板载 J-Link 固件(Jul 2025 → Jun 2026):第一次连 HM0360 板时失败(bootloader 超时),第二次成功;HM0360B 板第一次连上时已经停在 bootloader,随后升级成功。两块现在都正常。桥那块 DK 没升(之后的会话都禁止自动升级)。
   - `fw/`(52840 旧固件,Makefile)、`fw/tools/dk.ps1`、`codec_test`(MinGW)没有移植,Mac 上暂不能用。
