@@ -41,6 +41,8 @@ typedef struct {
   struct bt_gatt_discover_params disc;
   struct bt_gatt_discover_params cccDisc;
   struct bt_gatt_subscribe_params sub;
+  bool subscribed;  // sub is in the host's subscription list (until its notify(NULL))
+  struct k_work resub;  // subscribe on the current link once the previous link's sub is gone
   struct bt_gatt_exchange_params mtu;
   struct k_work setup;  // PHY, data length, MTU, discovery: off the BT RX thread
   uint32_t packets, bytes;  // notifications since the last stats line
@@ -100,8 +102,17 @@ static uint8_t onNotify(struct bt_conn *conn, struct bt_gatt_subscribe_params *p
   slot_t *s = CONTAINER_OF(params, slot_t, sub);
   int i = s - slots;
   if (data == NULL) {
-    text(i, "notifications off");
-    params->value_handle = 0;
+    // The host removed this subscription. Normally that is the link going away, but after a link
+    // loss (board reset, supervision timeout) it was also seen right after the board's new link
+    // had subscribed (2026-11-19: 0.01 s after "ready", 1 of 12 reconnects); the PC then got
+    // no more notifications from that board. The host keeps subscriptions per peer address,
+    // so this is most likely the previous link's cleanup. Subscribe again on the current link.
+    bool current = s->connected && s->conn == conn;
+    s->subscribed = false;
+    text(i, "notifications off%s", current ? "" : " (previous link)");
+    if (s->connected) {
+      k_work_submit(&s->resub);
+    }
     return BT_GATT_ITER_STOP;
   }
   s->packets++;
@@ -118,6 +129,12 @@ static void subscribe(int i)
     bt_conn_disconnect(s->conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
     return;
   }
+  if (s->subscribed) {
+    // The previous link's subscription is still listed (same params): not ready yet; its
+    // notify(NULL) submits resub.
+    text(i, "waiting for the previous link's subscription to be removed");
+    return;
+  }
   memset(&s->sub, 0, sizeof(s->sub));
   s->sub.notify = onNotify;
   s->sub.value = BT_GATT_CCC_NOTIFY;
@@ -126,14 +143,25 @@ static void subscribe(int i)
   s->sub.end_handle = s->controlHandle;  // the data CCC sits between the two characteristics
   s->sub.disc_params = &s->cccDisc;
   int err = bt_gatt_subscribe(s->conn, &s->sub);
-  if (err && err != -EALREADY) {
+  if (err) {
     text(i, "subscribe failed (%d)", err);
     return;
   }
+  s->subscribed = true;
   // Notifications are on once the CCC write is sent; the board starts nothing until a command.
   s->ready = true;
   text(i, "ready: data 0x%04x, control 0x%04x", s->dataHandle, s->controlHandle);
   sendEvent(i, CENTRAL_READY, 0);
+}
+
+static void resubscribe(struct k_work *work)
+{
+  slot_t *s = CONTAINER_OF(work, slot_t, resub);
+  // Only once discovery has found the handles; until then onDiscover subscribes.
+  if (s->conn && s->connected && s->dataHandle && s->controlHandle && !s->subscribed) {
+    s->ready = false;
+    subscribe(s - slots);
+  }
 }
 
 static uint8_t onDiscover(struct bt_conn *conn, const struct bt_gatt_attr *attr,
@@ -354,6 +382,7 @@ void centralInit(void)
 {
   for (int i = 0; i < CENTRAL_SLOTS; i++) {
     k_work_init(&slots[i].setup, setupLink);
+    k_work_init(&slots[i].resub, resubscribe);
   }
   int err = bt_enable(NULL);
   printk("[bridge] Bluetooth %s (%d)\n", err ? "failed" : "on", err);
