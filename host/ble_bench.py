@@ -22,28 +22,20 @@ import datetime
 import pathlib
 import re
 import statistics
-import subprocess
 import time
 
 from bleak import BleakClient
 
 import protocol
+import devtools  # ../tools (path set by protocol)
 
 HERE = pathlib.Path(__file__).resolve().parent
-JLINK_DIR = pathlib.Path(r"C:\Program Files\SEGGER\JLink")
 
 
-def start_rtt(board: dict, out_file: pathlib.Path) -> subprocess.Popen:
-    # Reset first: nrfjprog and the RTT logger cannot share the probe.
-    snr = board["snr"]
-    family = board.get("family", protocol.DEFAULT_FAMILY)
-    subprocess.run(["nrfjprog", "-f", family, "--snr", snr, "--reset"], capture_output=True)
-    if out_file.exists():
-        out_file.unlink()
-    return subprocess.Popen(
-        [str(JLINK_DIR / "JLinkRTTLogger.exe"), "-USB", snr, "-Device", board.get("device", protocol.DEFAULT_DEVICE), "-If", "SWD",
-         "-Speed", "4000", "-RTTChannel", "0", str(out_file)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+def start_rtt(board: dict, out_file: pathlib.Path) -> "devtools.RttLogger":
+    # Reset first: the reset tool and the RTT logger cannot share the probe.
+    devtools.reset_board(board["snr"], board.get("family", protocol.DEFAULT_FAMILY))
+    return devtools.RttLogger(board["snr"], board.get("device", protocol.DEFAULT_DEVICE), out_file)
 
 
 def parse_rtt(text: str) -> dict:
@@ -154,7 +146,7 @@ def main():
                 print("bridge released the boards")
             reset()
             time.sleep(2.0)  # firmware boot + advertising
-            t0, mtu, arrivals, frames, asm = asyncio.run(stream(protocol.BOARDS[names[0]]["address"], args.duration))
+            t0, mtu, arrivals, frames, asm = asyncio.run(stream(protocol.ble_target(names[0]), args.duration))
             results = [(names[0], f"direct, host MTU {mtu}", arrivals, frames, asm)]
         else:
             t0, links, arrivals, frames, asms = asyncio.run(stream_bridge(

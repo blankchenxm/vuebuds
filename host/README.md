@@ -2,13 +2,22 @@
 
 通过 BLE 实时接收 vuebuds 固件(设备名 `mustard`)发来的 HM01B0 图像,并在窗口里显示。
 
+双目图片 / 拼接 / VLM 的两个交互 DEMO：运行 `demo.ps1` 或 `python demo.py`，详见 [DEMO.md](DEMO.md)。
+
 ## 安装
 
-```powershell
+```bash
 cd host
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+python3 -m venv .venv            # Python ≥ 3.10;Windows: python -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt    # Windows: .\.venv\Scripts\python.exe -m pip ...
 ```
+
+- J-Link 工具(`--rtt`、`--reset`):读环境变量 `JLINK_DIR`,没有就用 `/Applications/SEGGER/JLink`(macOS)
+  或 `C:\Program Files\SEGGER\JLink`(Windows);复位用 `nrfjprog`(有就用)或 `nrfutil device`。代码在 `../tools/devtools.py`。
+- **macOS 直连要先认板子**:CoreBluetooth 不给 BLE 地址,bleak 只能用本机给每个外设编的 UUID。
+  `python ble_identify.py` 依次通过 J-Link 暂停每块 5340 板的网络核几秒,看哪个 `mustard` 停止广播,
+  结果写到 `boards.local.json`(gitignore,每台 Mac 自己的)。`--board` / `stereo.py` / `ble_bench.py` 直连时
+  从这里查 UUID;Windows / Linux 照旧按地址连。经桥(`--bridge`)不受影响,桥按地址连板子。
 
 ## 运行
 

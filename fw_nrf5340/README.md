@@ -51,28 +51,38 @@ streaming to `host/viewer.py`, or Monitor (frames cached in RAM, HM0360 S2 sleep
 Obsidian note `02-daily_raw/10.5~10.11/nrf5340迁移.md` §2, `src/pins.h`. Same as the nRF52840
 DK except FVLD → P1.09, LVLD → P1.10, CS loopback jumper P1.06 → P1.07.
 
-## Build / flash / log (PowerShell, NCS v3.2.1 in `D:\NRFSDK`)
+## Build / flash / log (macOS / Windows / Linux, NCS v3.2.1)
 
-```powershell
-.\tools\dk5340.ps1 run -Seconds 15                 # build + flash + RTT (HM0360 board)
-.\tools\dk5340.ps1 run -Board HM0360B -Mode QQVGA  # other board / mode
-.\tools\dk5340.ps1 run -ColorBar                   # test pattern
-.\tools\dk5340.ps1 run -Monitor -Mode QQVGA        # Monitor (-PeriodMs 0: every frame)
-.\tools\dk5340.ps1 run -Mode VGA                   # HM0360 VGA: ~4 s per frame over BLE;
-                                                   # Monitor keeps 1 slot, default period 1000 ms
-.\tools\dk5340.ps1 run -Cflags 'CAPTURE_STRESS_US=300'   # interrupt stress test
-.\tools\dk5340.ps1 build -Pristine                 # after adding a .conf / overlay file
-..\host\.venv\Scripts\python.exe ..\host\viewer.py --board hm0360-5340 --rtt --reset
+`tools/dk5340.py` (Python 3.8+, standard library; replaces `dk5340.ps1` since 2026-11-18). On
+Windows write `python` / `..\host\.venv\Scripts\python.exe` for `python3` / `../host/.venv/bin/python`.
+
+```bash
+python3 tools/dk5340.py run --seconds 15                 # build + flash + RTT (HM0360 board)
+python3 tools/dk5340.py run --board HM0360B --mode QQVGA # other board (by J-Link SN) / mode
+python3 tools/dk5340.py run --color-bar                  # test pattern
+python3 tools/dk5340.py run --monitor --mode QQVGA       # Monitor (--period-ms 0: every frame)
+python3 tools/dk5340.py run --mode VGA                   # HM0360 VGA: ~4 s per frame over BLE;
+                                                         # Monitor keeps 1 slot, default period 1000 ms
+python3 tools/dk5340.py run --cflags 'CAPTURE_STRESS_US=300'   # interrupt stress test
+python3 tools/dk5340.py build --pristine                 # after adding a .conf / overlay file
+python3 tools/dk5340.py camera --seconds 20              # reset + viewer.py over BLE with RTT + snapshot
+../host/.venv/bin/python ../host/viewer.py --board hm0360-5340 --rtt --reset
 # both boards (stream build flashed on each): Space takes a left + right pair, S saves it
-..\host\.venv\Scripts\python.exe ..\host\stereo.py          # --flash VGA: flash VGA to both first; --auto 5: no keyboard
-..\host\.venv\Scripts\python.exe ..\host\stitch.py ..\host\captures\stereo   # stitch saved pairs offline
+../host/.venv/bin/python ../host/stereo.py      # --flash VGA: flash VGA to both first; --auto 5: no keyboard
+../host/.venv/bin/python ../host/stitch.py ../host/captures/stereo   # stitch saved pairs offline
 ```
 
-- Zephyr's devicetree step fails on the spaces in the repo path, so the script maps the repo
-  to drive `V:` (`subst`) and builds in `V:\fw_nrf5340\build_<variant>`.
+- NCS: `nrfutil sdk-manager install v3.2.1` (macOS: `/opt/nordic/ncs`), found through
+  `nrfutil sdk-manager toolchain env`; otherwise `NCS_DIR` (default `D:\NRFSDK`) with toolchain
+  `NCS_TOOLCHAIN_ID` (default `66cdf9b75e`), the Windows install. Shared code: `../tools/devtools.py`.
+- Flash runner: `nrfjprog` where installed (Windows), else `nrfutil` (macOS; `WEST_RUNNER` overrides).
+- J-Link tools from `JLINK_DIR`, else `/Applications/SEGGER/JLink` or `C:\Program Files\SEGGER\JLink`.
+- Zephyr's devicetree step fails on the spaces in the repo path, so the script builds through
+  drive `V:` (`subst`, Windows) or a symlink `~/.cache/vuebuds-src/<hash>` (macOS / Linux):
+  `<that>/fw_nrf5340/build_<variant>`. A repo path without spaces is built in place.
 - Options reach the app image as `-Dfw_nrf5340_CAM_MODE=…` (sysbuild image prefix), read in
   `CMakeLists.txt` with `zephyr_get(... SYSBUILD LOCAL)`.
-- Bash: `source tools/ncs_env.sh` sets up the same toolchain.
+- Shell: `source tools/ncs_env.sh` sets up the same toolchain for `west` by hand.
 
 | Board | J-Link SN | BLE address |
 |---|---|---|
