@@ -16,6 +16,8 @@
 
 #define BLE_HEADER_COMMON_CLOCK    0x01  // capture_us is on the bridge's common clock (time sync)
 #define BLE_HEADER_MANUAL_EXPOSURE 0x02
+#define BLE_HEADER_SKIPPED         0x04  // 0xB8: at least one period was skipped before this picture
+#define BLE_HEADER_TIMED           0x10  // 0xB8: taken by the timed capture (not a 0xB2 request)
 
 typedef struct __packed {
   uint16_t width;

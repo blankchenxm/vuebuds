@@ -17,6 +17,7 @@ typedef enum {
   EVENT_CAMERA_ASLEEP,
   EVENT_CAMERA_SNAPSHOT,
   EVENT_BLE_COMMAND,  // a multi-byte control command is queued (bleNextCommand)
+  EVENT_CAMERA_TIMED,  // 0xB8 timed capture: the period's timer expired
 } event_t;
 
 void eventQueuePush(event_t event);

@@ -25,7 +25,7 @@
 extern void stressTestStart(void);
 #endif
 
-// Stream builds take either a continuous stream (0xB1) or single pictures (0xB2) per boot.
+// Stream builds take either a continuous stream (0xB1) or single / timed pictures (0xB2 / 0xB8) per boot.
 static bool streaming;
 
 static void processEvent(event_t event)
@@ -110,11 +110,25 @@ static void processEvent(event_t event)
     case EVENT_CAMERA_ASLEEP:
       snapshotAsleep();
       break;
+
+    case EVENT_CAMERA_TIMED:
+      snapshotTimedTick();
+      break;
 #endif
 
     case EVENT_BLE_COMMAND: {
       ble_command_t cmd;
       while (bleNextCommand(&cmd)) {
+#ifndef CAMERA_APP_MONITOR
+        if (cmd.data[0] == SNAPSHOT_CMD_TIMED) {
+          if (streaming) {
+            NRF_LOG_RAW_INFO("%08d [main] streaming (0xB1): timed capture ignored\n", systemTimeGetMs());
+          } else {
+            snapshotTimedCommand(cmd.data, cmd.len);
+          }
+          continue;
+        }
+#endif
         imageCommand(&cmd);
 #ifndef CAMERA_APP_MONITOR
         if (cmd.data[0] == IMAGE_CMD_SET_EXPOSURE) {
