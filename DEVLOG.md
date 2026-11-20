@@ -5,7 +5,7 @@
 
 ---
 
-## 2026-11-19 · balsamic3(V3)上板测试固件 fw_v3_test 进 git + 跨平台脚本(PR #?,工作台 Issue #13 / #6)
+## 2026-11-19 · balsamic3(V3)上板测试固件 fw_v3_test 进 git + 跨平台脚本(PR #54,Issue #53,工作台 #13 / #6)
 
 - **阶段**:工具 / 新硬件
 - **改了什么**:`fw_v3_test/`(新,11-15 在 Windows 上写、之前没进 git):`src/main.c`(V3 上板自检:MAX77650 PMIC、APS6404L PSRAM、HM0360 I2C / MCLK、LED、电源键,RTT 逐项 PASS / FAIL)、`boards/nrf5340dk_nrf5340_cpuapp.overlay`(DK 设备树改成 ISP2053 模块)、`boards/v3_module.overlay`(给别的程序叠加用,例如在 V3 上跑 `fw_nrf5340`)、`tools/v3test.ps1`(编译 / 烧录 / RTT)、`.gitignore`(`build*/`、`build_logs/`)。
@@ -14,6 +14,17 @@
 - **验证**:只提交 11-15 在 V3 板上跑过的源码,这次没有重新上板。
 - **11-19(fw-mac,hub #6 F1)**:并入 main;`tools/v3test.ps1` 换成 `tools/v3test.py`(用 `tools/devtools.py`,Mac / Windows 都能跑,和 `dk5340.py` 一样),参数 `build | flash | rtt | run [--seconds 70] [--snr 53001982] [--pristine]`。差异:烧录的 runner 按 `devtools.flash_runner()`(Mac 上 nrfutil);RTT 改用 J-Link Commander 的 RTT telnet(同 PR #51),先复位再接上(原来先接 logger 再复位),SWD 1 MHz 不变。
 - **遗留 / 下一步**:Mac 上只验证了编译(V3 板子和 J-Link EDU Mini 不在这台 Mac 上),烧录 / RTT 等板子接上再测。
+
+## 2026-11-19 · 离线比较与实时双目视觉 DEMO(PR #47,Issue #46;10-12 写成,11-19 合并)
+
+- **阶段**:演示工具，接续 Claude 已确认的 Gradio 方案。
+- **改了什么**:增加 `host/demo.py` 两页界面、`demo_core.py` 拍摄/拼接/烧录编排、`demo_vlm.py` 五模型流式接口、`demo.ps1` 启动器和独立回归测试。
+- **界面调整**:两个 DEMO 标签页统一为英文，放大标题、正文、操作按钮和图片预览，并增加分区留白；进度和错误提示也改为英文。
+- **为什么**:在窗口中比较现有图片的拼接和 VLM，并一键演示双板拍照、自动拼接、视觉理解与各段延迟。
+- **行为**:复用现有 0xB2 拍照与压缩/曝光命令；不改固件。依次尝试并采用首个合格拼接，全失败则回退原图。DEMO 首次连接及失败重试前释放旧 BLE 连接，避免混入旧请求。未同步的板端时钟不用于测拍摄时间差。
+- **验证**:13 项确定性回归通过；浏览器离线切换/重算/两种 VLM 输入和实时保存回读通过；5 个模型均实际流式返回；QVGA/VGA 真实照片运行全部 9 种拼接。双板 QVGA/VGA 编译烧录通过，右板 raw/PNG/JPEG 五档均正确解码、0 丢包。左板最初 I2C 无响应，用户重新接线后浏览器端到端通过：QVGA q85 左/右收齐 0.376/0.349 s，拼接失败按约定回退原图；VGA q85 同步曝光左/右寄存器相同（169/0/256，右板 manual），收齐 1.183/1.505 s，SIFT 71 ms / 70 内点后用拼接图完成 VLM；两档均 0 丢包。Qwen 首字/总耗时：QVGA 双原图 2.764/6.584 s，VGA 拼接图 7.429/39.950 s（单次测试，非基准）。仓库未配置 CI。
+- **遗留 / 下一步**:时钟同步仍在独立 `feat/time-sync` 分支；本 PR 不合入。
+- **11-19 合并前(fw-mac,hub #6 F1)**:并入 main(PR #51 起脚本跨平台);界面里的"编译烧录"改调 `fw_nrf5340/tools/dk5340.py`(原来调已删的 `dk5340.ps1`),Mac 上直接 `host/.venv/bin/python host/demo.py`(`demo.ps1` 仍给 Windows 用)。Mac 上的验证见 PR #47 的评论。
 
 ## 2026-11-18 · 固件开发搬到 MacBook:跨平台脚本 + macOS BLE(PR #51,Issue #50)
 
