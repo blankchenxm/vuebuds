@@ -11,17 +11,25 @@ data    char 0x1402: notifications of [seq, flags, payload...]
 control 0x1403: 0xB3 <format> <quality> image format; 0xB4 codec bench; 0xB6 00 auto exposure,
                 0xB6 01 <integration u16> <analog gain u8> <digital gain u16> fixed exposure
 """
+import json
+import pathlib
 import struct
+import sys
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+# ../tools/devtools.py (J-Link tools, board reset; shared with the firmware scripts) for the
+# host scripts that import this module.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "tools"))
+
 DEVICE_NAME = "mustard"
-# All DKs advertise as "mustard"; pick one by J-Link serial number and BLE address.
+# All DKs advertise as "mustard"; pick one by J-Link serial number and BLE address
+# (ble_target(): on macOS a per-Mac UUID instead of the address).
 # nRF52840 DKs run fw/, nRF5340 DKs run fw_nrf5340/ (same BLE protocol).
 # rotate: degrees clockwise that make the picture upright (stereo.py), checked on real
 # pictures with the modules as they sit on the two 5340 DKs (10-07; right board 270, 10-08).
-# dk_board: the board's name for fw_nrf5340/tools/dk5340.ps1 -Board (stereo.py --flash).
+# dk_board: the board's name for fw_nrf5340/tools/dk5340.py --board (stereo.py --flash).
 BOARDS = {
     "hm0360": {"snr": "1050291681", "address": "C8:1A:80:9C:01:BC"},
     "hm01b0": {"snr": "1050221517", "address": "D6:25:79:FD:6A:6B"},
@@ -31,6 +39,23 @@ BOARDS = {
                     "device": "nRF5340_xxAA_APP", "family": "nrf53", "rotate": 270,  # user 10-08: 90 + 180
                     "dk_board": "HM0360B"},
 }
+# macOS: CoreBluetooth hides BLE addresses; bleak connects by a UUID that this Mac assigns to
+# each board. Kept per machine in boards.local.json (gitignored), {board: uuid}, written by
+# `python ble_identify.py`. The bridge (bridge.py) still uses the addresses above.
+LOCAL_BOARDS = pathlib.Path(__file__).resolve().parent / "boards.local.json"
+
+
+def ble_target(board: str) -> str:
+    """What bleak connects to for a board in BOARDS: its address, or on macOS its UUID."""
+    if sys.platform != "darwin":
+        return BOARDS[board]["address"]
+    uuids = json.loads(LOCAL_BOARDS.read_text("utf-8")) if LOCAL_BOARDS.exists() else {}
+    if board not in uuids:
+        raise SystemExit(f"{board}: no CoreBluetooth UUID on this Mac yet; run `python ble_identify.py` "
+                         f"(writes {LOCAL_BOARDS.name})")
+    return uuids[board]
+
+
 # J-Link device / nrfjprog family of the nRF52840 boards (entries without "device").
 DEFAULT_DEVICE = "NRF52840_XXAA"
 DEFAULT_FAMILY = "nrf52"

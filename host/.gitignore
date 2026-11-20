@@ -3,3 +3,4 @@ logs/
 captures/
 __pycache__/
 .env
+boards.local.json
