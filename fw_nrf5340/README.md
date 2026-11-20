@@ -32,6 +32,15 @@ streaming to `host/viewer.py`, or Monitor (frames cached in RAM, HM0360 S2 sleep
   usual frame packets, then it sleeps again. A bad frame is retaken (up to 2 times). One boot
   takes either 0xB1 (stream) or 0xB2 (pictures). Used by `host/stereo.py` (two boards;
   `--exposure auto | fixed I A D | sync`).
+  **0xB8 timed capture** (F5, hub INTERFACES C2, 2026-11-19): `B8 01 <period u16 ms>` takes a
+  picture every period (100–60000 ms, 32.768 kHz clock), the first right away, like 0xB2 and in
+  the format of `B3`; `B8 00` stops; `B8 01 <P'>` while running changes the period. A period that
+  comes while the previous picture is still being taken or sent is skipped at the timer, not
+  queued: pictures stay on the period grid, and the next one has header flag `0x04`. Timed
+  pictures carry flag `0x10` (a 0xB2 in between does not). Same group as 0xB2 (not with 0xB1).
+  `host/timed_capture.py` measures the reached period. Without PSRAM the encoder output lives in
+  the RAM left after the frame slot: ~45 KB with VGA, so VGA JPEG q85 does not fit and goes out
+  raw (q60 fits).
 
 ## Encoders and PSRAM (2026-10-11)
 
