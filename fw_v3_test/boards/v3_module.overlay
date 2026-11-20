@@ -1,0 +1,18 @@
+/*
+ * ISP2053 module differences only (see nrf5340dk_nrf5340_cpuapp.overlay in this folder for
+ * the reasons). Added on top of other apps' overlays with -D<image>_EXTRA_DTC_OVERLAY_FILE,
+ * e.g. to run fw_nrf5340 (MONITOR) on balsamic3. Camera and I2C pins match the DK there.
+ * Note: such apps do not lower SBB2; keep the board powered after fw_v3_test has set 2.8 V.
+ */
+&lfxo {
+	load-capacitors = "external";
+	/delete-property/ load-capacitance-picofarad;
+};
+
+&vregh {
+	status = "disabled";
+};
+
+&qspi {
+	status = "disabled";
+};

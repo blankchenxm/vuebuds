@@ -5,6 +5,16 @@
 
 ---
 
+## 2026-11-19 · balsamic3(V3)上板测试固件 fw_v3_test 进 git + 跨平台脚本(PR #54,Issue #53,工作台 #13 / #6)
+
+- **阶段**:工具 / 新硬件
+- **改了什么**:`fw_v3_test/`(新,11-15 在 Windows 上写、之前没进 git):`src/main.c`(V3 上板自检:MAX77650 PMIC、APS6404L PSRAM、HM0360 I2C / MCLK、LED、电源键,RTT 逐项 PASS / FAIL)、`boards/nrf5340dk_nrf5340_cpuapp.overlay`(DK 设备树改成 ISP2053 模块)、`boards/v3_module.overlay`(给别的程序叠加用,例如在 V3 上跑 `fw_nrf5340`)、`tools/v3test.ps1`(编译 / 烧录 / RTT)、`.gitignore`(`build*/`、`build_logs/`)。
+- **为什么**:固件开发搬到 MacBook(工作台 Issue #13 / #14,用户 11-18),Mac 只能从 GitHub 拉代码。
+- **和原代码的行为差异**:无(新目录,不改 `fw/`、`fw_nrf5340/`)。
+- **验证**:只提交 11-15 在 V3 板上跑过的源码,这次没有重新上板。
+- **11-19(fw-mac,hub #6 F1)**:并入 main;`tools/v3test.ps1` 换成 `tools/v3test.py`(用 `tools/devtools.py`,Mac / Windows 都能跑,和 `dk5340.py` 一样),参数 `build | flash | rtt | run [--seconds 70] [--snr 53001982] [--pristine]`。差异:烧录的 runner 按 `devtools.flash_runner()`(Mac 上 nrfutil);RTT 改用 J-Link Commander 的 RTT telnet(同 PR #51),先复位再接上(原来先接 logger 再复位),SWD 1 MHz 不变。
+- **遗留 / 下一步**:Mac 上只验证了编译(V3 板子和 J-Link EDU Mini 不在这台 Mac 上),烧录 / RTT 等板子接上再测。
+
 ## 2026-11-19 · 离线比较与实时双目视觉 DEMO(PR #47,Issue #46;10-12 写成,11-19 合并)
 
 - **阶段**:演示工具，接续 Claude 已确认的 Gradio 方案。

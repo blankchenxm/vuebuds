@@ -218,7 +218,7 @@ class RttLogger:
 
     HEADER = (b"SEGGER J-Link", b"Process: ")  # the telnet server's banner lines
 
-    def __init__(self, snr, device, out_file):
+    def __init__(self, snr, device, out_file, speed=4000):
         import socket
         import tempfile
         import threading
@@ -234,7 +234,7 @@ class RttLogger:
             self._script = f.name
         probe = ["-USB", str(snr)] if snr else []
         kw = {"creationflags": subprocess.CREATE_NO_WINDOW} if IS_WINDOWS else {}
-        self.proc = subprocess.Popen([jlink_tool("JLink"), *probe, "-device", device, "-if", "SWD", "-speed", "4000",
+        self.proc = subprocess.Popen([jlink_tool("JLink"), *probe, "-device", device, "-if", "SWD", "-speed", str(speed),
                                       "-autoconnect", "0", "-NoGui", "1", "-RTTTelnetPort", str(self.port),
                                       "-CommandFile", self._script],
                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, **kw)
@@ -298,9 +298,9 @@ class RttLogger:
         return self.out_file.read_text("utf-8", "replace") if self.out_file.exists() else ""
 
 
-def capture_rtt(snr, device, out_file, seconds, label=""):
+def capture_rtt(snr, device, out_file, seconds, label="", speed=4000):
     """Attach the RTT logger for seconds, then print the log (as dk5340.ps1 rtt did)."""
-    logger = RttLogger(snr, device, out_file)
+    logger = RttLogger(snr, device, out_file, speed)
     try:
         time.sleep(seconds)
     finally:
