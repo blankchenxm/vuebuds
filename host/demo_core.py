@@ -5,6 +5,7 @@ import json
 import pathlib
 import queue
 import subprocess
+import sys
 import threading
 import time
 from zoneinfo import ZoneInfo
@@ -268,12 +269,12 @@ class Camera:
         try:
             self.close()
             self.requires_flash = True
-            script = HERE.parent / "fw_nrf5340" / "tools" / "dk5340.ps1"
+            script = HERE.parent / "fw_nrf5340" / "tools" / "dk5340.py"
             for side, board in BOARDS.items():
                 yield f"Building and flashing {side} / {mode}. Keep USB connected…"
                 process = subprocess.Popen([
-                    "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
-                    "flash", "-Mode", mode, "-Board", protocol.BOARDS[board]["dk_board"]],
+                    sys.executable, "-u", str(script),
+                    "flash", "--mode", mode, "--board", protocol.BOARDS[board]["dk_board"]],
                     cwd=script.parent.parent, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, encoding="utf-8", errors="replace",
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

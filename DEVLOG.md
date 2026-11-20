@@ -5,7 +5,7 @@
 
 ---
 
-## 2026-10-12 · 离线比较与实时双目视觉 DEMO(PR #47,Issue #46)
+## 2026-11-19 · 离线比较与实时双目视觉 DEMO(PR #47,Issue #46;10-12 写成,11-19 合并)
 
 - **阶段**:演示工具，接续 Claude 已确认的 Gradio 方案。
 - **改了什么**:增加 `host/demo.py` 两页界面、`demo_core.py` 拍摄/拼接/烧录编排、`demo_vlm.py` 五模型流式接口、`demo.ps1` 启动器和独立回归测试。
@@ -14,6 +14,44 @@
 - **行为**:复用现有 0xB2 拍照与压缩/曝光命令；不改固件。依次尝试并采用首个合格拼接，全失败则回退原图。DEMO 首次连接及失败重试前释放旧 BLE 连接，避免混入旧请求。未同步的板端时钟不用于测拍摄时间差。
 - **验证**:13 项确定性回归通过；浏览器离线切换/重算/两种 VLM 输入和实时保存回读通过；5 个模型均实际流式返回；QVGA/VGA 真实照片运行全部 9 种拼接。双板 QVGA/VGA 编译烧录通过，右板 raw/PNG/JPEG 五档均正确解码、0 丢包。左板最初 I2C 无响应，用户重新接线后浏览器端到端通过：QVGA q85 左/右收齐 0.376/0.349 s，拼接失败按约定回退原图；VGA q85 同步曝光左/右寄存器相同（169/0/256，右板 manual），收齐 1.183/1.505 s，SIFT 71 ms / 70 内点后用拼接图完成 VLM；两档均 0 丢包。Qwen 首字/总耗时：QVGA 双原图 2.764/6.584 s，VGA 拼接图 7.429/39.950 s（单次测试，非基准）。仓库未配置 CI。
 - **遗留 / 下一步**:时钟同步仍在独立 `feat/time-sync` 分支；本 PR 不合入。
+- **11-19 合并前(fw-mac,hub #6 F1)**:并入 main(PR #51 起脚本跨平台);界面里的"编译烧录"改调 `fw_nrf5340/tools/dk5340.py`(原来调已删的 `dk5340.ps1`),Mac 上直接 `host/.venv/bin/python host/demo.py`(`demo.ps1` 仍给 Windows 用)。Mac 上的验证见 PR #47 的评论。
+
+## 2026-11-18 · 固件开发搬到 MacBook:跨平台脚本 + macOS BLE(PR #51,Issue #50)
+
+- **阶段**:工具(工作台 hub #14,fw-win → fw-mac)
+- **改了什么**:
+  - `tools/devtools.py`(新):找 NCS v3.2.1(`nrfutil sdk-manager toolchain env`,否则 `NCS_DIR` / `D:\NRFSDK` + 工具链 `66cdf9b75e`)、空格路径(Windows `subst V:`,Mac 符号链接 `~/.cache/vuebuds-src/<hash>`,**源码目录要显式传给 west**,传 `.` 会被 getcwd 解析回带空格的真实路径)、J-Link 工具(`JLINK_DIR`,否则 `/Applications/SEGGER/JLink` 或 `C:\Program Files\SEGGER\JLink`)、复位(有 nrfjprog 用它,否则 `nrfutil device reset`)、RTT。
+  - `fw_nrf5340/tools/dk5340.py`(新,替代 `dk5340.ps1`,已删):`build / flash / rtt / run / camera`,参数同原脚本(`--board --mode --color-bar --monitor --period-ms --cflags --pristine --seconds`),编译目录名不变;`camera` = 复位 + `viewer.py --rtt --reset` + 截图。
+  - `fw_bridge/tools/bridge_fw.py`(新,替代 `bridge.ps1`,已删):`build / flash / rtt`。
+  - `host/`:`viewer.py`、`ble_bench.py`、`codec_bench.py` 的 J-Link 路径和复位改用 `devtools`;`stereo.py --flash` 调 `dk5340.py`;`protocol.ble_target()`:Windows / Linux 照旧按 MAC 连,**macOS 按本机 UUID**(`boards.local.json`,gitignore);`ble_identify.py`(新)认板子。`requirements.txt` 加 `pyserial`。
+  - `fw_nrf5340/tools/ncs_env.sh` 支持 macOS;README(`fw_nrf5340`、`fw_bridge`、`host`)和 `CLAUDE.md`(会话名 `fw-mac`、Mac 环境一节)更新。
+- **为什么**:Xiaomeng 11-18 在 hub 定:固件开发搬到 MacBook,"改固件 → 烧录 → Mac 客户端验证"在一台机器上闭环;脚本两边都要能跑。
+- **和原代码的行为差异**(固件没改):
+  - **RTT 不再用 JLinkRTTLogger**:V9.96 在 Mac 上对 nRF5340 一直报 `RTT Control Block not found`(加 `-RTTAddress 0x20001010` 也一样),而 J-Link Commander 能找到。改成 Commander 连上(不暂停 CPU)+ 读它的 RTT telnet 端口(每个实例一个空闲端口,两块板可同时抓),Windows 上也走这条路。日志文件内容相同(去掉 telnet 开头的横幅行)。
+  - 本工具开的 J-Link 会话都 `exec DisableAutoUpdateFW`(见下面板载 J-Link 固件升级)。
+  - Mac 上没有 nrfjprog:复位用 `nrfutil device reset`,烧录 `west flash --runner nrfutil`(有 nrfjprog 时仍用 nrfjprog;`WEST_RUNNER` 可改)。
+  - 桥的烧录从 `nrfjprog --program merged.hex --sectorerase --verify --reset` 改成 `west flash`(同样只擦固件占用的扇区、校验、复位)。
+  - 脚本参数从 PowerShell 风格(`-Mode`)变成 `--mode`。
+- **验证**(MacBook,M 系列,macOS 26):
+  - 编译(同 `fb6b10e` 的固件源码,`--pristine`)和 Windows 基线(hub #13)**逐字节一致**:QVGA / VGA 应用核 FLASH 158216 B、RAM 55508 B;网络核 171352 B / 45416 B;桥 181996 B / 93552 B。
+  - 两块 5340 板按 SN 烧录(`nrfutil`,两核都校验通过);RTT:两块板都抓到开机日志(地址 `DA:E7:DE:69:E3:5E`、`EA:F1:6D:2A:C0:BB` 与原来一致),桥也抓到。
+  - `ble_identify.py` 认出两块板的 UUID(一次通过)。
+  - `dk5340.py camera`(viewer,QVGA 推流 20 s):两块板各 20 帧、0 丢包、每帧 DMA `38400 38400`,约 1.2 fps(Windows 直连约 1 fps)。
+  - `stereo.py --flash QVGA --auto 3`:先经 `dk5340.py` 给两块板各烧一次(约 39 s / 块),再拍 3 对、全部保存、0 丢包。左板每张约 4.7 s、右板约 0.8 s(Mac 给两条连接的间隔不同,和 Windows 双连时的不均衡类似;桥模式不受影响)。
+  - 经桥(11-19,桥 DK 的 nRF USB 口接到 Mac 后出现 `/dev/cu.usbmodem1101`,VID 0x2FE3 "VueBuds bridge"):`stereo.py --bridge --auto 3` 两块板都经桥连上(间隔 15 ms、PHY 2M、MTU 498),拍 4 对(第 1 对预热)、存 3 对、0 丢包,每张约 1.5 s,左右一致;`ble_bench.py --bridge --board hm0360-5340 hm0360b-5340 --duration 30` 两块板 0.77 / 0.80 fps、58 / 60 KB/s(合计 118 KB/s,和 PR #40 的桥上限 110–116 KB/s 一致)、0 丢包、固件 0 坏帧;`bridge.py --stream` 两块板各 7 帧 / 10 s。
+  - 注意:`bridge.py --stream` 前板子这次开机要没用过 0xB2(固件一次开机只接受 0xB1 / 0xB2 其中一种),也不要刚用 `nrfutil` 复位完就跑(旧连接要 4 s 才超时,`wait_ready` 会把它当成已就绪),否则收到 0 帧;`ble_bench.py` 自己处理了这两点。
+- **遗留 / 下一步**:
+  - J-Link V9.96 第一次连两块 5340 DK 时自动升级了板载 J-Link 固件(Jul 2025 → Jun 2026):第一次连 HM0360 板时失败(bootloader 超时),第二次成功;HM0360B 板第一次连上时已经停在 bootloader,随后升级成功。两块现在都正常。桥那块 DK 没升(之后的会话都禁止自动升级)。
+  - `fw/`(52840 旧固件,Makefile)、`fw/tools/dk.ps1`、`codec_test`(MinGW)没有移植,Mac 上暂不能用。
+
+## 2026-11-17 · CLAUDE.md 加入工作台协作规则(PR #49,Issue #48)
+
+- **阶段**:文档
+- **改了什么**:`CLAUDE.md` 开头加"工作台(跨模块协作)"一节,内容来自工作台仓库 `snippets/module-claude-md-block.md`:本仓库 = 固件(fw)模块,会话名 `fw-win`,任务标签 `needs:fw`,工作台本机 clone 在 `D:\Projects\Proactive camera agent\proactive-av-agent-hub`。11-18 按工作台 PR #10 / #12 的新段落补两条:**hub 派的 `needs:fw` Issue 直接做**(`decision`、改接口、待定内容、不可逆操作、改权限仍要用户本人),**回执**(回来信会话一句 + Issue 评论 + `doing` / `blocked` 标签)。
+- **为什么**:四个模块仓库(vuebuds、kicad-agent-flow、数据 / 模型、Mac 管线)改成在工作台仓库 `blankchenxm/proactive-av-agent-hub` 里协作(见其 `COLLAB.md`):开工前看 `STATUS.md` 和 `needs:fw` 的 Issue,交接走 `handoff` Issue,跨模块接口先改 `INTERFACES.md`。后两条是用户 11-18 在 hub 定的,并在 fw-win 里确认改本文件。
+- **和原代码的行为差异**:无(只改文档)。
+- **验证**:无需上板。
+- **遗留 / 下一步**:跨机器会话消息(Remote Control)还没在三台机器上实测(`COLLAB.md` §6 第 4 步)。
 
 ## 2026-10-11 · 板上压缩(JPEG / PNG)+ PSRAM 驱动 + 压缩测试命令(PR #44,Issue #43)
 

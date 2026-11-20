@@ -13,7 +13,6 @@ import csv
 import datetime
 import pathlib
 import re
-import subprocess
 import time
 
 import cv2
@@ -21,9 +20,9 @@ import numpy as np
 
 import bridge
 import protocol
+import devtools  # ../tools (path set by protocol)
 
 HERE = pathlib.Path(__file__).resolve().parent
-JLINK_DIR = pathlib.Path(r"C:\Program Files\SEGGER\JLink")
 FORMATS = ["raw", "png", "q95", "q90", "q85", "q75", "q60"]
 ENCODE_RE = re.compile(r"\[img\] frame (\d+): (JPEG|PNG) q(\d+) (\d+) B, encode (\d+) us")
 
@@ -41,12 +40,9 @@ def psnr(a: np.ndarray, b: np.ndarray) -> float:
     return float("inf") if mse == 0 else 10 * np.log10(255 ** 2 / mse)
 
 
-def attach_rtt(board: dict, out: pathlib.Path) -> subprocess.Popen:
+def attach_rtt(board: dict, out: pathlib.Path) -> "devtools.RttLogger":
     """RTT logger without a reset (the bridge keeps its link to the board)."""
-    return subprocess.Popen(
-        [str(JLINK_DIR / "JLinkRTTLogger.exe"), "-USB", board["snr"], "-Device", board.get("device", protocol.DEFAULT_DEVICE),
-         "-If", "SWD", "-Speed", "4000", "-RTTChannel", "0", str(out)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+    return devtools.RttLogger(board["snr"], board.get("device", protocol.DEFAULT_DEVICE), out)
 
 
 def main():

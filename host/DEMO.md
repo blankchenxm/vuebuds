@@ -4,6 +4,14 @@
 
 ## 启动
 
+macOS / Linux（在仓库根目录，`host/.venv` 按 `requirements.txt` 装好）：
+
+```bash
+host/.venv/bin/python host/demo.py            # 桥的串口按 VID 自动找(/dev/cu.usbmodem*),也可加 --bridge-port
+```
+
+界面里的"编译烧录"调用 `fw_nrf5340/tools/dk5340.py`（Mac / Windows 都能跑）。
+
 在 Windows PowerShell 中执行（可从任意目录运行）：
 
 ```powershell

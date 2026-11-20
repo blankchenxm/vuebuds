@@ -17,15 +17,17 @@ bridge (§3.3.1). The bridge, not Windows, sets the link, so both boards get the
 - Two USB cables: the J-Link port (flash, RTT) and the **nRF USB** port on the side (data).
   The PC sees a COM port with Zephyr's VID `0x2FE3` (`host/bridge.py` finds it by VID).
 
-## Build / flash (PowerShell, from `fw_bridge/`)
+## Build / flash (from `fw_bridge/`; macOS / Windows / Linux)
 
-```powershell
-.\tools\bridge.ps1 flash             # build + program + reset
-.\tools\bridge.ps1 rtt -Seconds 20   # RTT log without a reset (links stay up)
-.\tools\bridge.ps1 flash -UsbTest    # USB link test build; then python host\usb_test.py
+```bash
+python3 tools/bridge_fw.py flash               # build + program + reset
+python3 tools/bridge_fw.py rtt --seconds 20    # RTT log without a reset (links stay up)
+python3 tools/bridge_fw.py flash --usb-test    # USB link test build; then python host/usb_test.py
 ```
 
-NCS v3.2.1 under `D:\NRFSDK`, as `fw_nrf5340/`. Sysbuild passes image options as
+NCS v3.2.1 and J-Link found as in `fw_nrf5340/` (`../tools/devtools.py`); replaces `bridge.ps1`
+since 2026-11-18. Flashing goes through `west flash` (bridge.ps1 called `nrfjprog --program
+merged.hex --sectorerase --verify --reset`). Sysbuild passes image options as
 `-Dfw_bridge_<NAME>=...` (e.g. `-Dfw_bridge_CONFIG_...`).
 
 ## Link setup (src/central.c, prj.conf)
