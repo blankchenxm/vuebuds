@@ -9,6 +9,7 @@
 #include "image.h"
 #include "camera.h"
 #include "capture.h"
+#include "event.h"
 #include "timers.h"
 #include "snapshot.h"
 
@@ -19,19 +20,31 @@
 #define SNAPSHOT_MAX_RETAKES 2
 
 static bool m_started;
-static bool m_busy;       // woken / armed, frame not sent yet
+static volatile bool m_busy;  // woken / armed, frame not sent yet (read by the timed capture's timer)
 static bool m_s2;         // HM0360: S2 sleep between pictures
 static uint32_t m_count;
 static uint8_t m_retakes;  // bad frames retaken for the current request
 static uint32_t m_request_ms;
+static bool m_timed_picture;  // the picture in progress was started by the timed capture
+static volatile bool m_skipped;  // a timed period was skipped since the last timed picture
+static volatile uint32_t m_timed_skips, m_skips_logged;
+static uint32_t m_timed_period_ms, m_timed_taken;
+
+static void request(bool timed);
 
 void snapshotRequest(void)
+{
+  request(false);
+}
+
+static void request(bool timed)
 {
   if (m_busy) {
     NRF_LOG_RAW_INFO("%08d [snap] busy, request ignored\n", systemTimeGetMs());
     return;
   }
   m_request_ms = systemTimeGetMs();
+  m_timed_picture = timed;
   if (!m_started) {
     cameraInit();
     if (cameraModelId() == 0) {
@@ -73,6 +86,10 @@ void snapshotFrameDone(void)
   }
   if (ok) {
     imagePrepare(&frame);  // exposure over I2C: before S2, which turns I2C off (~3 ms of the 13)
+    if (m_timed_picture) {
+      imageAddFlags(BLE_HEADER_TIMED | (m_skipped ? BLE_HEADER_SKIPPED : 0));
+      m_skipped = false;
+    }
   }
   if (m_s2 && !cameraExposureManual()) {
     // Capture ends ~13 ms (VGA ~28 ms) before the frame boundary, where DPPI pulls XSLEEP low.
@@ -120,4 +137,69 @@ void snapshotExposureChanged(void)
 bool snapshotActive(void)
 {
   return m_started;
+}
+
+// ---- timed capture (0xB8) ----
+
+// Decided at the expiry (timer interrupt), not when the main thread gets to the event: the main
+// thread is blocked while a picture is queued for BLE, so a queued expiry would take the next
+// picture late instead of skipping it (11-19: raw QVGA at 500 / 1000 ms came every ~1.3 s).
+static void timedExpiry(struct k_timer *timer)
+{
+  if (m_busy) {
+    m_skipped = true;
+    m_timed_skips++;
+    return;
+  }
+  eventQueuePush(EVENT_CAMERA_TIMED);
+}
+static K_TIMER_DEFINE(m_timed_timer, timedExpiry, NULL);
+
+#define TIMED_MIN_MS 100
+#define TIMED_MAX_MS 60000
+
+void snapshotTimedCommand(const uint8_t *data, uint8_t len)
+{
+  uint8_t mode = len >= 2 ? data[1] : 0xFF;
+  if (mode == 0) {
+    k_timer_stop(&m_timed_timer);
+    NRF_LOG_RAW_INFO("%08d [timed] stop: %u taken, %u skipped\n", systemTimeGetMs(), m_timed_taken, m_timed_skips);
+    m_timed_period_ms = 0;
+    return;
+  }
+  uint16_t period = len >= 4 ? (uint16_t)(data[2] | (data[3] << 8)) : 0;
+  if (mode != 1 || period < TIMED_MIN_MS || period > TIMED_MAX_MS) {
+    NRF_LOG_RAW_INFO("%08d [timed] bad command: mode %u, period %u ms (%u bytes)%s\n", systemTimeGetMs(), mode, period,
+                     len, mode == 2 ? ", ring buffer not in this build" : "");
+    return;
+  }
+  // From stopped: the first picture right away. A new period while running: from now on.
+  bool running = m_timed_period_ms != 0;
+  m_timed_period_ms = period;
+  m_timed_taken = m_timed_skips = m_skips_logged = 0;
+  m_skipped = false;
+  k_timer_start(&m_timed_timer, running ? K_MSEC(period) : K_NO_WAIT, K_MSEC(period));
+  NRF_LOG_RAW_INFO("%08d [timed] every %u ms%s\n", systemTimeGetMs(), period, running ? " (new period)" : "");
+}
+
+void snapshotTimedTick(void)
+{
+  if (m_timed_period_ms == 0) {
+    return;  // stopped after this expiry was queued
+  }
+  if (m_busy) {  // a 0xB2 picture started after the expiry
+    m_skipped = true;
+    m_timed_skips++;
+  }
+  uint32_t skips = m_timed_skips;
+  if (skips != m_skips_logged) {
+    NRF_LOG_RAW_INFO("%08d [timed] %u period(s) skipped (picture in progress), %u so far\n", systemTimeGetMs(),
+                     skips - m_skips_logged, skips);
+    m_skips_logged = skips;
+  }
+  if (m_busy) {
+    return;
+  }
+  m_timed_taken++;
+  request(true);
 }

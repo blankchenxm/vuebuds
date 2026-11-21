@@ -187,6 +187,11 @@ void imagePrepare(const camera_frame_t *frame)
   }
 }
 
+void imageAddFlags(uint8_t flags)
+{
+  m_header.flags |= flags;
+}
+
 bool imageSend(const camera_frame_t *frame)
 {
   m_header.frame_id = ++m_frame_id;
