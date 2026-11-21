@@ -6,7 +6,10 @@
  * covers are dropped from the index. The index (RAM) holds, per frame: frame number, capture
  * time (FVLD rise, 64-bit us), PSRAM address, length, size, format and a CRC32 of the bytes.
  *
- * Not yet: compression (frames are stored raw, RING_FORMAT is recorded for later), BLE commands
+ * Compression (hub #39, 11-20): ringAppendJpeg() encodes the frame straight into the ring ("store
+ * compressed"); ringFetchJpeg() encodes a raw entry from PSRAM in 8-row bands ("compress on fetch",
+ * here into a counting sink: the fetch command does not exist yet).
+ * Not yet: BLE commands
  * to query / fetch (need an INTERFACES change), a common clock (capture time is the board's).
  */
 #ifndef RING_H_
@@ -31,7 +34,8 @@ typedef struct {
   uint32_t len;         // bytes
   uint32_t crc;         // CRC32 (IEEE) of the stored bytes
   uint16_t width, height;
-  uint8_t format;       // BLE_FORMAT_* (raw only for now)
+  uint8_t format;       // BLE_FORMAT_RAW or BLE_FORMAT_JPEG
+  uint8_t quality;      // JPEG quality (0 for raw)
 } ring_entry_t;
 
 typedef struct {
@@ -46,6 +50,14 @@ typedef struct {
 bool ringInit(void);  // false: no PSRAM
 /* Copy the frame's standard region into the ring; *write_us = time spent writing PSRAM. */
 bool ringAppend(const camera_frame_t *frame, uint32_t seq, uint32_t capture_us32, uint32_t *write_us);
+/* Encode the frame as JPEG into the ring (frees the oldest frames as the output grows; at most one raw
+ * frame of space is kept free at the end). *encode_us = encode + write. */
+bool ringAppendJpeg(const camera_frame_t *frame, uint8_t quality, uint32_t seq, uint32_t capture_us32,
+                    uint32_t *encode_us);
+/* JPEG-encode a raw entry from PSRAM (8-row bands into band, width x 8 bytes); the output is only
+ * counted. Returns the size (< 0: error); *us = read + encode. */
+int32_t ringFetchJpeg(const ring_entry_t *e, uint8_t quality, uint8_t *band, uint32_t *us);
+void ringReset(void);  // empty the ring and the statistics (test configurations)
 /* Read the entry back from PSRAM and compare its CRC; *read_us = time spent. */
 bool ringVerify(const ring_entry_t *e, uint32_t *read_us);
 

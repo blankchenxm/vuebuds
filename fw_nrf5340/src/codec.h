@@ -22,6 +22,9 @@ int codecInit(void *workspace, size_t size);  // 0, or -1 if too small
 
 /* Return the encoded size in bytes, or a negative error. quality 1..100 (libjpeg scale). */
 int32_t codecJpeg(const uint8_t *pixels, int stride, int width, int height, int quality, codec_io_t *io);
+/* Same, pixels from rows(ctx, y, band): 8 rows y..y+7 into band (width x 8, stride width). */
+int32_t codecJpegBands(int width, int height, int quality, codec_io_t *io, int (*rows)(void *ctx, int y, uint8_t *band),
+                       void *ctx, uint8_t *band);
 /* level 0..9 (zlib) */
 int32_t codecPng(const uint8_t *pixels, int stride, int width, int height, int level, codec_io_t *io);
 

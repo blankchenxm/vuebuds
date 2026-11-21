@@ -6,6 +6,7 @@
 #include "nrf_log.h"
 
 #include "ble.h"
+#include "codec.h"
 #include "psram.h"
 #include "timers.h"
 #include "ring.h"
@@ -48,6 +49,26 @@ static bool overlapsOldest(uint32_t a, uint32_t n)
   return a < o->addr + o->len && o->addr < a + n;
 }
 
+static void indexAdd(uint32_t seq, uint32_t capture_us32, uint32_t addr, uint32_t len, uint32_t crc,
+                     const camera_frame_t *frame, uint8_t format, uint8_t quality)
+{
+  // 64-bit capture time: the 32-bit us clock wraps every ~71.6 min.
+  uint64_t t = (m_last_us & ~0xFFFFFFFFull) | capture_us32;
+  if (m_count + m_stats.appended > 0 && t < m_last_us) {
+    t += 1ull << 32;
+  }
+  m_last_us = t;
+
+  ring_entry_t *e = &m_index[(m_head + m_count) % RING_INDEX_MAX];
+  *e = (ring_entry_t){.seq = seq, .capture_us = t, .addr = addr, .len = len, .crc = crc,
+                      .width = frame->width, .height = frame->height, .format = format, .quality = quality};
+  m_count++;
+  m_write_addr = addr + len;
+  m_stats.appended++;
+  m_stats.used_bytes += len;
+  m_stats.frames = m_count;
+}
+
 bool ringAppend(const camera_frame_t *frame, uint32_t seq, uint32_t capture_us32, uint32_t *write_us)
 {
   *write_us = 0;
@@ -87,21 +108,7 @@ bool ringAppend(const camera_frame_t *frame, uint32_t seq, uint32_t capture_us32
     return false;
   }
 
-  // 64-bit capture time: the 32-bit us clock wraps every ~71.6 min.
-  uint64_t t = (m_last_us & ~0xFFFFFFFFull) | capture_us32;
-  if (m_count + m_stats.appended > 0 && t < m_last_us) {
-    t += 1ull << 32;
-  }
-  m_last_us = t;
-
-  ring_entry_t *e = &m_index[(m_head + m_count) % RING_INDEX_MAX];
-  *e = (ring_entry_t){.seq = seq, .capture_us = t, .addr = addr, .len = len, .crc = crc,
-                      .width = frame->width, .height = frame->height, .format = BLE_FORMAT_RAW};
-  m_count++;
-  m_write_addr = addr + len;
-  m_stats.appended++;
-  m_stats.used_bytes += len;
-  m_stats.frames = m_count;
+  indexAdd(seq, capture_us32, addr, len, crc, frame, BLE_FORMAT_RAW, 0);
   return true;
 }
 
@@ -171,4 +178,112 @@ const ring_entry_t *ringFindNearest(uint64_t t_us)
 const ring_stats_t *ringStats(void)
 {
   return &m_stats;
+}
+
+/* ---------------- compression (hub #39) ---------------- */
+
+typedef struct {
+  codec_io_t io;
+  uint32_t base, pos, cap, crc;
+  bool failed;
+} ring_sink_t;
+
+// Encoder output straight into the ring: free the oldest frames the bytes are about to cover.
+static int32_t sinkWrite(codec_io_t *io, const uint8_t *data, int32_t len)
+{
+  ring_sink_t *s = io->ctx;
+  if (s->pos + len > s->cap) {
+    s->failed = true;
+    return 0;
+  }
+  uint32_t a = s->base + s->pos;
+  while (m_count > 0 && (m_count == RING_INDEX_MAX || overlapsOldest(a, len))) {
+    evictOldest();
+  }
+  if (!psramWrite(a, data, len)) {
+    s->failed = true;
+    return 0;
+  }
+  s->crc = crc32_ieee_update(s->crc, data, len);
+  s->pos += len;
+  return len;
+}
+
+// Fetch test: the output is only counted (and its CRC taken).
+static int32_t countWrite(codec_io_t *io, const uint8_t *data, int32_t len)
+{
+  ring_sink_t *s = io->ctx;
+  s->crc = crc32_ieee_update(s->crc, data, len);
+  s->pos += len;
+  return len;
+}
+
+static int32_t noRead(codec_io_t *io, uint8_t *data, int32_t len)
+{
+  return 0;
+}
+
+static int32_t noSeek(codec_io_t *io, int32_t position)
+{
+  return -1;
+}
+
+bool ringAppendJpeg(const camera_frame_t *frame, uint8_t quality, uint32_t seq, uint32_t capture_us32,
+                    uint32_t *encode_us)
+{
+  *encode_us = 0;
+  if (!m_ready) {
+    return false;
+  }
+  uint32_t cap = (uint32_t)frame->width * frame->height;  // a JPEG larger than the raw frame fails
+  uint32_t addr = m_write_addr;
+  if (addr + cap > RING_BYTES) {
+    addr = 0;
+    m_stats.wraps++;
+  }
+  ring_sink_t s = {.io = {sinkWrite, noRead, noSeek, NULL}, .base = addr, .cap = cap};
+  s.io.ctx = &s;
+  uint32_t t0 = systemTimeGetUs();
+  int32_t n = codecJpeg(frame->pixels, frame->stride, frame->width, frame->height, quality, &s.io);
+  *encode_us = systemTimeGetUs() - t0;
+  if (n <= 0 || s.failed || (uint32_t)n != s.pos) {
+    m_stats.write_errors++;
+    NRF_LOG_RAW_INFO("[ring] JPEG q%u failed: %d, %u B written%s\n", quality, n, s.pos, s.failed ? ", sink full / write error" : "");
+    m_write_addr = addr;  // the partial output is garbage; evicted frames stay evicted
+    return false;
+  }
+  indexAdd(seq, capture_us32, addr, (uint32_t)n, s.crc, frame, BLE_FORMAT_JPEG, quality);
+  return true;
+}
+
+typedef struct {
+  const ring_entry_t *e;
+} fetch_ctx_t;
+
+static int fetchRows(void *ctx, int y, uint8_t *band)
+{
+  const ring_entry_t *e = ((fetch_ctx_t *)ctx)->e;
+  return psramRead(e->addr + (uint32_t)y * e->width, band, (uint32_t)e->width * 8) ? 0 : -1;
+}
+
+int32_t ringFetchJpeg(const ring_entry_t *e, uint8_t quality, uint8_t *band, uint32_t *us)
+{
+  if (e == NULL || e->format != BLE_FORMAT_RAW) {
+    return -1;
+  }
+  ring_sink_t s = {.io = {countWrite, noRead, noSeek, NULL}};
+  s.io.ctx = &s;
+  fetch_ctx_t f = {e};
+  uint32_t t0 = systemTimeGetUs();
+  int32_t n = codecJpegBands(e->width, e->height, quality, &s.io, fetchRows, &f, band);
+  *us = systemTimeGetUs() - t0;
+  return n;
+}
+
+void ringReset(void)
+{
+  m_head = m_count = 0;
+  m_write_addr = 0;
+  m_last_us = 0;
+  memset(&m_stats, 0, sizeof(m_stats));
 }

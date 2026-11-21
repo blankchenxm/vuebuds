@@ -12,6 +12,7 @@
 #include "monitor.h"
 #ifdef MONITOR_RING
 #include "ring.h"
+#include "codec.h"
 #endif
 
 // 0: no RTC, every frame is stored (the next slot is armed as soon as one is done).
@@ -93,28 +94,89 @@ static uint64_t m_ring_prev_us;
 static bool m_ring_pending;
 static uint32_t m_ring_slot, m_ring_seq, m_ring_start_us;
 
+/*
+ * hub #39 step 2: stored format. RING_JPEG_Q=<q> stores JPEG q (0 = raw, the default);
+ * RING_TEST_CYCLE runs RING_TEST_FRAMES frames each of raw, q60, q75, q85, q95 stored compressed,
+ * emptying the ring between them; at the end of the raw run the newest frame is JPEG-encoded from
+ * PSRAM at each quality (compress on fetch).
+ */
+#ifndef RING_TEST_FRAMES
+#define RING_TEST_FRAMES 30
+#endif
+#ifdef RING_TEST_CYCLE
+static const uint8_t m_cfg_q[] = {0, 60, 75, 85, 95};
+#elif defined(RING_JPEG_Q)
+static const uint8_t m_cfg_q[] = {RING_JPEG_Q};
+#else
+static const uint8_t m_cfg_q[] = {0};
+#endif
+static const uint8_t m_fetch_q[] = {60, 75, 85, 95};
+static uint32_t m_cfg, m_cfg_frames, m_cfg_overruns0, m_cfg_dropped0, m_cfg_verify0;
+static uint8_t *m_band;  // 8 rows for the fetch test, after the encoder workspace
+
+static void ringCfgLog(const char *what)
+{
+  NRF_LOG_RAW_INFO("%08d [ring] === %s cfg %u: %s%u, %u frames, overruns %u, bad frames %u, verify errors %u, write errors %u\n",
+                   systemTimeGetMs(), what, m_cfg, m_cfg_q[m_cfg] ? "store JPEG q" : "raw ", m_cfg_q[m_cfg], m_cfg_frames,
+                   m_overruns - m_cfg_overruns0, m_dropped - m_cfg_dropped0, m_ring_verify_errors - m_cfg_verify0,
+                   ringStats()->write_errors);
+}
+
+static void ringCfgNext(void)
+{
+  if (m_cfg_q[m_cfg] == 0 && m_band != NULL) {
+    const ring_entry_t *e = ringNewest();
+    for (int i = 0; i < ARRAY_SIZE(m_fetch_q); i++) {
+      uint32_t us;
+      int32_t n = ringFetchJpeg(e, m_fetch_q[i], m_band, &us);
+      NRF_LOG_RAW_INFO("%08d [ring] fetch seq %u as JPEG q%u: %d B, read + encode %u us\n", systemTimeGetMs(), e ? e->seq : 0,
+                       m_fetch_q[i], n, us);
+    }
+  }
+  ringCfgLog("end");
+  m_cfg = (m_cfg + 1) % ARRAY_SIZE(m_cfg_q);
+  m_cfg_frames = 0;
+  m_cfg_overruns0 = m_overruns;
+  m_cfg_dropped0 = m_dropped;
+  m_cfg_verify0 = m_ring_verify_errors;
+  m_ring_prev_us = 0;
+  ringReset();
+  ringCfgLog("start");
+}
+
 static void ringStore(uint32_t s, uint32_t seq, uint32_t start_us)
 {
   camera_frame_t f;
   uint32_t write_us, new_us = 0, old_us = 0;
-  if (!cameraSlotFrame(s, &f) || !ringAppend(&f, seq, start_us, &write_us)) {
+  uint8_t q = m_cfg_q[m_cfg];
+  bool stored = cameraSlotFrame(s, &f) &&
+                (q ? ringAppendJpeg(&f, q, seq, start_us, &write_us) : ringAppend(&f, seq, start_us, &write_us));
+  m_cfg_frames++;
+  if (!stored) {
     NRF_LOG_RAW_INFO("%08d [ring] seq %u: NOT stored (write errors %u)\n", systemTimeGetMs(), seq,
                      ringStats()->write_errors);
+#ifdef RING_TEST_CYCLE
+    if (m_cfg_frames >= RING_TEST_FRAMES) {
+      ringCfgNext();
+    }
+#endif
     return;
   }
   const ring_entry_t *n = ringNewest(), *o = ringAt(0);
   bool new_ok = ringVerify(n, &new_us);
-  bool old_ok = (o == n) || ringVerify(o, &old_us);
+  bool old_checked = o != n && (seq % 10) == 0;  // the oldest every 10th frame (VGA raw: ~230 ms per read-back)
+  bool old_ok = !old_checked || ringVerify(o, &old_us);
   if (!new_ok || !old_ok) {
     m_ring_verify_errors++;
   }
   uint32_t gap_ms = m_ring_prev_us ? (uint32_t)((n->capture_us - m_ring_prev_us) / 1000) : 0;
   m_ring_prev_us = n->capture_us;
   const ring_stats_t *st = ringStats();
-  NRF_LOG_RAW_INFO("%08d [ring] seq %u t %u ms (+%u) @0x%06x: write %u us,", systemTimeGetMs(), seq,
-                   (uint32_t)(n->capture_us / 1000), gap_ms, n->addr, write_us);
+  NRF_LOG_RAW_INFO("%08d [ring] seq %u t %u ms (+%u) @0x%06x: %s%u %u B, %s %u us,", systemTimeGetMs(), seq,
+                   (uint32_t)(n->capture_us / 1000), gap_ms, n->addr, q ? "q" : "raw", q, n->len,
+                   q ? "encode + write" : "write", write_us);
   NRF_LOG_RAW_INFO(" read back new %s %u us, oldest seq %u %s %u us,", new_ok ? "ok" : "BAD", new_us, o->seq,
-                   old_ok ? "ok" : "BAD", old_us);
+                   old_checked ? (old_ok ? "ok" : "BAD") : "-", old_us);
   NRF_LOG_RAW_INFO(" wake -> stored %u ms\n", systemTimeGetMs() - m_wake_ms);
   NRF_LOG_RAW_INFO("%08d [ring]   %u frames, span %u ms, %u KB, wraps %u,", systemTimeGetMs(), st->frames,
                    (uint32_t)((n->capture_us - o->capture_us) / 1000), st->used_bytes / 1024, st->wraps);
@@ -131,6 +193,11 @@ static void ringStore(uint32_t s, uint32_t seq, uint32_t start_us)
                      systemTimeGetMs(), (uint32_t)(t / 1000), le ? le->seq : 0, near ? near->seq : 0, a->seq,
                      ok ? "ok" : "WRONG");
   }
+#ifdef RING_TEST_CYCLE
+  if (m_cfg_frames >= RING_TEST_FRAMES) {
+    ringCfgNext();
+  }
+#endif
 }
 #endif
 
@@ -156,6 +223,28 @@ void monitorStart(void)
   }
 #ifdef MONITOR_RING
   ringInit();
+#if defined(RING_TEST_CYCLE) || (defined(RING_JPEG_Q) && RING_JPEG_Q > 0)
+  {
+    // Encoder workspace + an 8-row band after the Monitor slots; give up slots until it fits.
+    size_t ws = (codecWorkspaceSize() + 7) & ~7u, need = ws + 640 * 8 + 8;
+    uint32_t spare = 0;
+    uint8_t *mem;
+    while ((mem = frame_pool_after(m_slot_count, &spare)) == NULL || spare < need) {
+      if (m_slot_count <= 1) {
+        break;
+      }
+      m_slot_count--;
+    }
+    if (mem != NULL && spare >= need && codecInit(mem, ws) == 0) {
+      m_band = (uint8_t *)(((uintptr_t)mem + ws + 7) & ~(uintptr_t)7);
+    }
+    NRF_LOG_RAW_INFO("%08d [ring] encoder: workspace %u B, %u B after %u slots: %s\n", systemTimeGetMs(), (unsigned)ws,
+                     spare, m_slot_count, m_band ? "ok" : "NO ROOM");
+  }
+#endif
+#ifdef RING_TEST_CYCLE
+  ringCfgLog("start");
+#endif
 #endif
   m_running = true;
 
