@@ -17,6 +17,7 @@ typedef enum {
   EVENT_CAMERA_ASLEEP,
   EVENT_CAMERA_SNAPSHOT,
   EVENT_BLE_COMMAND,  // a multi-byte control command is queued (bleNextCommand)
+  EVENT_PSRAM_CHECK,  // PSRAM_CHECK_WAIT_MS after the boot check started: read it back (psram.h)
 } event_t;
 
 void eventQueuePush(event_t event);

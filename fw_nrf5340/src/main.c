@@ -19,6 +19,7 @@
 #include "ble.h"
 #include "image.h"
 #include "i2c.h"
+#include "psram.h"
 #include "timers.h"
 
 #ifdef CAPTURE_STRESS_US
@@ -127,11 +128,21 @@ static void processEvent(event_t event)
       break;
     }
 
+    case EVENT_PSRAM_CHECK:
+      psramCheckFinish();
+      break;
+
     default:
       NRF_LOG_RAW_INFO("%08d [main] unhandled event:%d\n", systemTimeGetMs(), event);
       break;
   }
 }
+
+static void psramCheckDue(struct k_timer *t)
+{
+  eventQueuePush(EVENT_PSRAM_CHECK);
+}
+static K_TIMER_DEFINE(psramCheckTimer, psramCheckDue, NULL);
 
 int main(void)
 {
@@ -151,6 +162,12 @@ int main(void)
     k_sleep(K_FOREVER);
   }
 #endif
+  // PSRAM boot check (psram.h): write now, read back PSRAM_CHECK_WAIT_MS later without holding
+  // up BLE; a picture compressed before then waits for it (image.c).
+  psramCheckStart();
+  if (psramState() == PSRAM_STATE_WAITING) {
+    k_timer_start(&psramCheckTimer, K_MSEC(PSRAM_CHECK_WAIT_MS), K_NO_WAIT);
+  }
   bleInit();
   NRF_LOG_RAW_INFO("%08d [mustard] booted\n", systemTimeGetMs());
 
