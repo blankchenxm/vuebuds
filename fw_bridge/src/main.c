@@ -10,6 +10,8 @@
  *   'T'  [slot mask][delay ms u16][camera command]: timed command at one bridge time T for all
  *        (central.h centralTimedWrite; 0xB7 = picture at T)
  *   'Q'  [token u32]: bridge time -> FRAME_TIME [token u32][bridge us u64][ok u8] (PC <-> bridge sync)
+ *        bridge time: us since the bridge booted (restarts at 0 when it reboots / is re-plugged)
+ * 'T' also answers FRAME_TIMED [command u8][T u64 us].
  * Bridge -> PC: [A5 5A][type][slot][len u16 LE][payload], types in central.h.
  *
  * Build with -Dfw_bridge_USB_TEST=1 for the USB link test instead (src/usb_test.c, host/usb_test.py).

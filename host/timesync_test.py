@@ -10,7 +10,6 @@ rebooted ('X') first; the first picture after boot is taken at once (camera star
 """
 import argparse
 import csv
-import re
 import statistics
 import time
 
@@ -47,15 +46,7 @@ def main():
     n = len(args.boards)
     mask = (1 << n) - 1
     frames = [[] for _ in range(n)]
-    shots = []  # (pc time, T us)
     usb = []
-    timed_re = re.compile(r"timed 0x([0-9a-f]{2}) at (\d+)\.(\d{3}) ms")
-
-    def on_text(slot, text):
-        m = timed_re.search(text)
-        if m:
-            shots.append((time.monotonic(), int(m.group(2)) * 1000 + int(m.group(3))))
-
     loggers = []
     if args.rtt:
         for i, b in enumerate(args.boards):
@@ -63,7 +54,7 @@ def main():
             loggers.append(devtools.RttLogger(brd["snr"], brd.get("device", protocol.DEFAULT_DEVICE),
                                               f"{args.rtt}_{'LR'[i]}.log"))
     asms = [protocol.FrameAssembler(lambda f, i=i: frames[i].append(f), lambda m: None) for i in range(n)]
-    with bridge.Bridge(args.port, on_text=on_text, on_event=lambda s, l: None) as br:
+    with bridge.Bridge(args.port, on_text=lambda s, t: None, on_event=lambda s, l: None) as br:
         br.on_notify = lambda s, d: asms[s].feed(d) if s < n else None
         br.configure([protocol.BOARDS[b]["address"] for b in args.boards])
         t_x = 0.0 if args.no_reset else time.monotonic()
@@ -92,6 +83,7 @@ def main():
                 next_shot += args.every
             time.sleep(max(0.0, min(next_shot - time.monotonic(), 1.0)))
         time.sleep(3.0)
+        shots = [(t, T) for t, cmd, T in br.timed if cmd == CMD_SNAPSHOT_AT and T]
     for lg in loggers:
         lg.stop()
 

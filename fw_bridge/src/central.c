@@ -53,6 +53,7 @@ typedef struct {
   bool anchorValid;
   uint64_t anchorUs;
   uint16_t anchorCounter;
+  bool clockChecked;
 } slot_t;
 
 static slot_t slots[CENTRAL_SLOTS];
@@ -66,6 +67,7 @@ static struct k_spinlock anchorLock;
 
 static void connectNext(struct k_work *work);
 static void scheduleReference(void);
+static void clockCheck(int i);
 static K_WORK_DELAYABLE_DEFINE(connectWork, connectNext);
 
 static void text(int slot, const char *fmt, ...)
@@ -269,6 +271,10 @@ static void sendReferences(struct k_work *work)
   for (int i = 0; i < CENTRAL_SLOTS; i++) {
     if (slots[i].ready) {
       writeTimed(i, CMD_TIME_REFERENCE, NULL);
+      if (!slots[i].clockChecked) {
+        slots[i].clockChecked = true;
+        clockCheck(i);
+      }
     }
   }
   k_work_reschedule(&referenceWork, K_SECONDS(REFERENCE_PERIOD_S));
@@ -374,6 +380,10 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
   slot_t *s = &slots[i];
   s->connected = false;
   s->ready = false;
+  s->clockChecked = false;
+  k_spinlock_key_t akey = k_spin_lock(&anchorLock);
+  s->anchorValid = false;
+  k_spin_unlock(&anchorLock, akey);
   bt_conn_unref(s->conn);
   s->conn = NULL;
   k_mutex_unlock(&lock);
@@ -435,6 +445,8 @@ static void stats(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(statsWork, stats);
 static void stats(struct k_work *work)
 {
+  uint64_t unused;
+  centralNowUs(&unused);  // counts RTC0 wraps
 #ifdef CONFIG_SCHED_THREAD_USAGE_ALL
   static uint64_t lastAll, lastIdle;
   k_thread_runtime_stats_t all;
@@ -539,30 +551,47 @@ void centralTimedWrite(uint8_t mask, uint16_t delay_ms, uint8_t cmd)
       usbSendFrame(FRAME_WRITE, i, &err, 1);
     }
   }
+  uint8_t msg[9] = {cmd};
+  sys_put_le64(base ? t_us : 0, &msg[1]);
+  usbSendFrame(FRAME_TIMED, 0xFF, msg, sizeof(msg));  // T in us (0: no anchor, nothing sent)
   text(-1, "timed 0x%02x at %u.%03u ms (bridge clock)", cmd, (uint32_t)(t_us / 1000), (uint32_t)(t_us % 1000));
+}
+
+/* Bridge time = the controller clock: RTC0 (32768 Hz, 24 bits = 512 s, owned by MPSL; reading
+ * it is harmless), extended here by counting its wraps. stats() reads it every second, so no
+ * wrap is missed, with or without a board connected. Call with anchorLock held. */
+static uint32_t rtcLast, rtcEpochs;
+static uint64_t rtcTicks(void)
+{
+  uint32_t t = nrf_rtc_counter_get(NRF_RTC0);
+  if (t < rtcLast) {
+    rtcEpochs++;
+  }
+  rtcLast = t;
+  return ((uint64_t)rtcEpochs << 24) | t;
 }
 
 bool centralNowUs(uint64_t *us)
 {
-  /* The controller clock is RTC0 (32768 Hz, 24 bits, owned by MPSL; reading it is harmless).
-   * Its upper bits come from the newest anchor point, which is at most a few events old. */
-  uint64_t anchor = 0;
   k_spinlock_key_t key = k_spin_lock(&anchorLock);
-  uint32_t ticks = nrf_rtc_counter_get(NRF_RTC0);
-  for (int i = 0; i < CENTRAL_SLOTS; i++) {
-    if (slots[i].anchorValid) {
-      anchor = MAX(anchor, slots[i].anchorUs);
-    }
-  }
+  uint64_t ticks = rtcTicks();
   k_spin_unlock(&anchorLock, key);
-  if (anchor == 0) {
-    *us = 0;
-    return false;
-  }
-  uint64_t anchor_ticks = anchor * 512u / 15625u;
-  int32_t d = (int32_t)(((ticks - (uint32_t)anchor_ticks) & 0xFFFFFFu) << 8) >> 8;  // signed 24 bits
-  *us = (anchor_ticks + d) * 15625u / 512u;
+  *us = ticks * 15625u / 512u;
   return true;
+}
+
+/* Once per link: the RTC-based bridge time must sit just after the newest anchor point. */
+static void clockCheck(int i)
+{
+  uint64_t now;
+  centralNowUs(&now);
+  k_spinlock_key_t key = k_spin_lock(&anchorLock);
+  bool valid = slots[i].anchorValid;
+  uint64_t anchor = slots[i].anchorUs;
+  k_spin_unlock(&anchorLock, key);
+  if (valid) {
+    text(i, "clock check: bridge time - newest anchor = %d us", (int32_t)(now - anchor));
+  }
 }
 
 void centralTimeReply(uint32_t token)

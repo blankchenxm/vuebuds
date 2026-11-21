@@ -15,7 +15,9 @@ Frames (little endian):
       'E'  link event (central_event_t in fw_bridge/src/central.h)
       'S'  log text
       'W'  int8 result of a control write
-      'Q'  [token u32][bridge time u64 us][ok u8]  answer to 'Q' (ok 0: no link yet, no clock)
+      'Q'  [token u32][bridge time u64 us][ok u8]  answer to 'Q' (ok is always 1); bridge time = us
+                               since the bridge booted: re-sync after it reboots or is re-plugged
+      'T'  [command u8][T u64 us]  answer to 'T': the bridge time used (0: no anchor, not sent)
 
 Command line, e.g. stream both boards for 20 s and print per-board rates:
     python bridge.py --boards hm0360-5340 hm0360b-5340 --stream --duration 20
@@ -90,6 +92,7 @@ class Bridge:
         self.links = [Link(), Link()]
         self.write_results: list[tuple[float, int, int]] = []  # (time, slot, err)
         self._time_wait: dict = {}  # token -> Event, then (bridge_us, ok)
+        self.timed: list[tuple[float, int, int]] = []  # 'T' answers: (time.monotonic(), command, T us)
         self._ser = serial.Serial(self.port, timeout=0.1)
         self._ser.dtr = True
         self._stop = threading.Event()
@@ -208,6 +211,9 @@ class Bridge:
             if isinstance(ev, threading.Event):
                 self._time_wait[tok] = (us, ok)
                 ev.set()
+        elif ftype == "T" and len(payload) >= 9:
+            cmd, t_us = struct.unpack_from("<BQ", payload)
+            self.timed.append((time.monotonic(), cmd, t_us))
         elif ftype == "W":
             self.write_results.append((time.monotonic(), slot, struct.unpack("<b", payload)[0]))
         elif ftype == "E" and len(payload) >= EVENT.size:
