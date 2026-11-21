@@ -18,6 +18,7 @@ typedef enum {
   EVENT_CAMERA_SNAPSHOT,
   EVENT_BLE_COMMAND,  // a multi-byte control command is queued (bleNextCommand)
   EVENT_CAMERA_TIMED,  // 0xB8 timed capture: the period's timer expired
+  EVENT_PSRAM_CHECK,  // PSRAM_CHECK_WAIT_MS after the boot check started: read it back (psram.h)
 } event_t;
 
 void eventQueuePush(event_t event);

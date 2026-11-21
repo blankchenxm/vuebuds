@@ -103,7 +103,7 @@ static bool codecReady(void)
     return false;
   }
   m_sink.io = (codec_io_t){sinkWrite, sinkRead, sinkSeek, &m_sink};
-  if (psramInit()) {
+  if (psramCheckFinish()) {  // boot check (psram.h); waits if the picture comes within 2 s of boot
     m_sink.ram = NULL;
     m_sink.cap = PSRAM_SIZE;
   } else {
