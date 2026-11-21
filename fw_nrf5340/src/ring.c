@@ -22,7 +22,7 @@ static bool m_ready;
 
 bool ringInit(void)
 {
-  m_ready = psramInit();
+  m_ready = psramCheckFinish();  // boot check (psram.h): waits until 2 s after boot
   NRF_LOG_RAW_INFO("%08d [ring] %s: %u KB, index %u frames\n", systemTimeGetMs(),
                    m_ready ? "PSRAM ready" : "NO PSRAM, ring off", RING_BYTES / 1024, RING_INDEX_MAX);
   return m_ready;
