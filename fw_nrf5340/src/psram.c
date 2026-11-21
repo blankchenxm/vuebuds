@@ -290,3 +290,103 @@ bool psramRead(uint32_t address, void *data, size_t len)
 {
   return access(false, address, data, len);
 }
+
+/* ---------------- boot check ---------------- */
+
+#define CHECK_BLOCK 1024u
+static const uint32_t m_check_at[] = {0x000000, 0x2AB400, 0x555800, PSRAM_SIZE - CHECK_BLOCK};  // spread over A0-A22
+static psram_state_t m_state;
+static int64_t m_check_t0;
+static uint32_t m_check_bad[2];  // bad bytes at once / after the wait
+
+static uint8_t checkByte(uint32_t address)
+{
+  uint32_t x = address * 0x9E3779B1u + 0x5A17u;  // differs per address, so aliased addresses show up
+  x ^= x >> 15;
+  x *= 0x2C1B3C6Du;
+  x ^= x >> 12;
+  return (uint8_t)x;
+}
+
+static uint32_t checkRead(void)
+{
+  uint8_t *b = (uint8_t *)m_bounce;  // psramRead takes RAM buffers directly, so the bounce buffer is free here
+  uint32_t bad = 0;
+  for (int i = 0; i < ARRAY_SIZE(m_check_at); i++) {
+    if (!psramRead(m_check_at[i], b, CHECK_BLOCK)) {
+      return UINT32_MAX;
+    }
+    for (uint32_t j = 0; j < CHECK_BLOCK; j++) {
+      bad += b[j] != checkByte(m_check_at[i] + j);
+    }
+  }
+  return bad;
+}
+
+void psramCheckStart(void)
+{
+  if (m_state != PSRAM_STATE_UNCHECKED) {
+    return;
+  }
+  if (!psramInit()) {
+    m_state = PSRAM_STATE_NO_ID;
+    NRF_LOG_RAW_INFO("[psram] boot check: %s, using on-chip RAM\n", psramStateName(m_state));
+    return;
+  }
+  uint8_t *b = (uint8_t *)m_bounce;
+  bool ok = true;
+  for (int i = 0; i < ARRAY_SIZE(m_check_at) && ok; i++) {
+    for (uint32_t j = 0; j < CHECK_BLOCK; j++) {
+      b[j] = checkByte(m_check_at[i] + j);
+    }
+    ok = psramWrite(m_check_at[i], b, CHECK_BLOCK);
+  }
+  m_check_t0 = k_uptime_get();
+  m_check_bad[0] = ok ? checkRead() : UINT32_MAX;
+  m_state = PSRAM_STATE_WAITING;
+  if (m_check_bad[0] != 0) {
+    m_state = PSRAM_STATE_BAD_AT_ONCE;
+    m_present = false;
+    NRF_LOG_RAW_INFO("[psram] boot check: %u / %u bytes wrong right after the write: %s, using on-chip RAM\n",
+                     m_check_bad[0], (unsigned)sizeof(m_check_at) / 4 * CHECK_BLOCK, psramStateName(m_state));
+  }
+}
+
+bool psramCheckFinish(void)
+{
+  if (m_state == PSRAM_STATE_UNCHECKED) {
+    psramCheckStart();
+  }
+  if (m_state == PSRAM_STATE_WAITING) {
+    int64_t left = m_check_t0 + PSRAM_CHECK_WAIT_MS - k_uptime_get();
+    if (left > 0) {
+      k_sleep(K_MSEC(left));
+    }
+    m_check_bad[1] = checkRead();
+    uint32_t waited = (uint32_t)(k_uptime_get() - m_check_t0);
+    m_state = m_check_bad[1] == 0 ? PSRAM_STATE_OK : PSRAM_STATE_BAD_LATER;
+    m_present = m_state == PSRAM_STATE_OK;
+    NRF_LOG_RAW_INFO("[psram] boot check: %u x %u B written, 0 wrong at once, %u wrong %u ms later: %s%s\n",
+                     (unsigned)ARRAY_SIZE(m_check_at), CHECK_BLOCK, m_check_bad[1], waited, psramStateName(m_state),
+                     m_present ? "" : ", using on-chip RAM");
+  }
+  return m_state == PSRAM_STATE_OK;
+}
+
+psram_state_t psramState(void)
+{
+  return m_state;
+}
+
+const char *psramStateName(psram_state_t state)
+{
+  switch (state) {
+    case PSRAM_STATE_UNCHECKED: return "not checked";
+    case PSRAM_STATE_WAITING: return "waiting";
+    case PSRAM_STATE_OK: return "OK";
+    case PSRAM_STATE_NO_ID: return "no PSRAM (ID did not read back)";
+    case PSRAM_STATE_BAD_AT_ONCE: return "FAILED (wrong at once: wires / clock)";
+    case PSRAM_STATE_BAD_LATER: return "FAILED (lost bits after the wait: retention)";
+  }
+  return "?";
+}

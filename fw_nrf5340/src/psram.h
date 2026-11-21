@@ -7,7 +7,7 @@
  * (0x0B / 0x02) both work, but on the DK's jumper wires quad reads break off when all four
  * data lines go high at once (2026-10-14, src/hw_test.c), so the default is single line at
  * 48 MHz in 32 B bursts: CE# low ~6.5 us, under tCEM (8 us for the 3 V part, measured on the
- * pin). Main thread only; polled, no interrupt.
+ * pin). Main thread only; polled, no interrupt. Boot check: psramCheckStart() below.
  */
 #ifndef PSRAM_H_
 #define PSRAM_H_
@@ -30,6 +30,29 @@ typedef struct {
 
 bool psramInit(void);  // default config; true if the chip answers with the APS6404L ID (0x0D 0x5D)
 bool psramPresent(void);
+
+/*
+ * Boot check (2026-11-20, hub #39): the HM0360B board's chip lost bits 1-3 s after they were
+ * written while reads right after the write were fine, so the check writes a few small blocks
+ * across the chip, reads them at once and again PSRAM_CHECK_WAIT_MS later. Not passed: the
+ * PSRAM is not used (psramPresent() false, users fall back to on-chip RAM).
+ *   psramCheckStart(): boot, main thread; init + write + first read, returns at once.
+ *   psramCheckFinish(): second read, once; waits until PSRAM_CHECK_WAIT_MS after the start
+ *     (main.c posts EVENT_PSRAM_CHECK then; image.c calls it before its first PSRAM use).
+ */
+#define PSRAM_CHECK_WAIT_MS 2000
+typedef enum {
+  PSRAM_STATE_UNCHECKED = 0,  // psramCheckStart() not called yet
+  PSRAM_STATE_WAITING,        // written, second read not done yet
+  PSRAM_STATE_OK,
+  PSRAM_STATE_NO_ID,          // no APS6404L ID: not fitted or not wired
+  PSRAM_STATE_BAD_AT_ONCE,    // wrong right after the write (wires, clock)
+  PSRAM_STATE_BAD_LATER,      // right at once, wrong PSRAM_CHECK_WAIT_MS later (retention)
+} psram_state_t;
+void psramCheckStart(void);
+bool psramCheckFinish(void);  // true: PSRAM OK to use
+psram_state_t psramState(void);
+const char *psramStateName(psram_state_t state);
 /* Any address, length and buffer (RAM or flash); unaligned edges go through a bounce buffer. */
 bool psramWrite(uint32_t address, const void *data, size_t len);
 bool psramRead(uint32_t address, void *data, size_t len);

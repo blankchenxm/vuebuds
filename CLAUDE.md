@@ -122,7 +122,7 @@
 ## 桥(fw_bridge/)和新硬件(2026-10-10 起)
 
 - 电脑端验证编码器:`fw_nrf5340/tools/codec_test/`(MinGW gcc `C:\MinGW\bin`,和固件同一份源码,`run_codec_test.py` 和 OpenCV 比)。
-- 两块 5340 板都加了 **FSIN → P1.11**、**TRIGGER → P0.25**、**PSRAM**(MIKROE DRAM Click,APS6404L 8 MB:CS P1.12、SDI P1.13、SDO P1.14、SCK P1.15,IO2 / IO3 接地,SPIM4 8 MHz,**SCK / SDI / CS 必须强驱动 H0H1**)。自检:`dk5340.ps1 run -Cflags 'HW_TEST' -Seconds 75`(`src/hw_test.c`,逐项 PASS / FAIL)。PSRAM 读 ID 应为 `0D 5D`;读成 `0B 6D`、只有全 0 / 全 1 读得对 = SCK 上有毛刺(SDO 跳变时芯片多收一个时钟):杜邦线下标准驱动不够,HM0360 板改强驱动后正常(10-11)。
+- 两块 5340 板都加了 **FSIN → P1.11**、**TRIGGER → P0.25**、**PSRAM**(MIKROE DRAM Click,APS6404L 8 MB;2026-10-14 起改接 QSPI:CE# P0.18、SCK P0.17、SIO0–3 P0.13–P0.16,单线 48 MHz、32 B 一段,四线在杜邦线上不稳不用;DK 上的 MX25R64 已断开;**开机自检**写 4 × 1 KB、马上读和 2 s 后再读,不过就退回片内 RAM(PR #60 起,hub #39);原来是 SPIM4 8 MHz 在 P1.12–P1.15,P1.12 现在是相机 INT)。自检:`dk5340.ps1 run -Cflags 'HW_TEST' -Seconds 75`(`src/hw_test.c`,逐项 PASS / FAIL)。PSRAM 读 ID 应为 `0D 5D`;读成 `0B 6D`、只有全 0 / 全 1 读得对 = SCK 上有毛刺(SDO 跳变时芯片多收一个时钟):杜邦线下标准驱动不够,HM0360 板改强驱动后正常(10-11)。
 - 桥:默认间隔 15 ms(双板时 10 / 30 ms 两条连接不均衡);两块板合计约 110–116 KB/s 是桥这边的上限。相机板同时只接受一个连接:桥插着时 Windows 直连工具要先 `python bridge.py --release`(`ble_bench.py` 直连模式会自动做)。
 - 桥连上后的 PHY / 数据长度 / MTU / 发现服务**不能在 connected 回调(BT RX 线程)里调用**,会死锁并断言 `Controller unresponsive`;放到工作队列。
 - sysbuild 下给桥传选项要写 `-Dfw_bridge_<NAME>`(和 `fw_nrf5340` 一样)。

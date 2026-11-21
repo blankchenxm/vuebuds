@@ -68,12 +68,20 @@ CMD_SNAPSHOT = 0xB2
 CMD_SET_FORMAT = 0xB3
 CMD_CODEC_BENCH = 0xB4  # next picture sent raw, PNG, JPEG q95 / 90 / 85 / 75 / 60 (same frame id)
 CMD_SET_EXPOSURE = 0xB6
+CMD_TIMED = 0xB8  # timed capture: <mode u8> <period u16 ms>; mode 1 start, 0 stop (INTERFACES C2, F5)
 FORMAT_RAW, FORMAT_PNG, FORMAT_JPEG = 0, 1, 2
 FORMAT_NAMES = {FORMAT_RAW: "raw", FORMAT_PNG: "png", FORMAT_JPEG: "jpeg"}
 
 
 def set_format_command(fmt: int, quality: int = 0) -> bytes:
     return bytes([CMD_SET_FORMAT, fmt, quality])
+
+
+def timed_command(period_ms: int) -> bytes:
+    """0xB8: a picture every period_ms (100-60000); 0 stops."""
+    if period_ms == 0:
+        return bytes([CMD_TIMED, 0])
+    return bytes([CMD_TIMED, 1]) + struct.pack("<H", period_ms)
 
 
 def set_exposure_command(integration: Optional[int] = None, analog_gain: int = 0, digital_gain: int = 0) -> bytes:
@@ -90,6 +98,8 @@ FRAME_HEADER = struct.Struct("<HH")  # width, height (v1)
 HEADER_V2 = struct.Struct("<HHBBIIHHBHB")
 HEADER_COMMON_CLOCK = 0x01
 HEADER_MANUAL_EXPOSURE = 0x02
+HEADER_SKIPPED = 0x04  # 0xB8: at least one period skipped before this picture
+HEADER_TIMED = 0x10    # 0xB8: taken by the timed capture, not a 0xB2 request
 # Placeholder canvas size before the first frame header arrives.
 DEFAULT_SIZE = (320, 240)
 

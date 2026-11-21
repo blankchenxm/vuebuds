@@ -2,6 +2,7 @@
 #define SNAPSHOT_H_
 
 #include <stdbool.h>
+#include <stdint.h>
 
 /*
  * Take one picture (control command 0xB2, stream builds only). The first request
@@ -21,6 +22,17 @@ void snapshotRequest(void);    // EVENT_CAMERA_SNAPSHOT
 void snapshotFrameDone(void);  // EVENT_CAMERA_CAPTURE_DONE: sleep the sensor, send the frame
 void snapshotAsleep(void);     // EVENT_CAMERA_ASLEEP: XSLEEP went low on the frame boundary, stop MCLK
 bool snapshotActive(void);     // a picture has been requested since boot
+
+/*
+ * Timed capture (0xB8 <mode> <period u16 ms>, F5, hub INTERFACES C2, 2026-11-19): mode 1 takes
+ * a picture every period (100-60000 ms) on the 32.768 kHz clock, the first one right away, the
+ * same way as 0xB2; mode 0 stops. A period that comes while the previous picture is still being
+ * taken or sent is skipped (not queued): the next picture has BLE_HEADER_SKIPPED. Timed pictures
+ * carry BLE_HEADER_TIMED, so a 0xB2 in between can be told apart. Mode 2 (ring buffer) is not here.
+ */
+#define SNAPSHOT_CMD_TIMED 0xB8
+void snapshotTimedCommand(const uint8_t *data, uint8_t len);
+void snapshotTimedTick(void);  // EVENT_CAMERA_TIMED
 void snapshotExposureChanged(void);  // after 0xB6: manual -> wake and stay awake, auto -> sleep again
 
 #endif
