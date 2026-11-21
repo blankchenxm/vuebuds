@@ -34,3 +34,15 @@
 &spi4 {
 	status = "disabled";
 };
+
+/*
+ * QSPI (P0.13-P0.18): the PSRAM (src/psram.c, nrfx_qspi at register level). The onboard
+ * MX25R64 flash is cut off on our DKs (SB10-SB15 open, SB20-SB25 shorted), so no flash driver.
+ */
+&mx25r64 {
+	status = "disabled";
+};
+
+&qspi {
+	status = "disabled";
+};

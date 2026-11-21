@@ -11,17 +11,25 @@ data    char 0x1402: notifications of [seq, flags, payload...]
 control 0x1403: 0xB3 <format> <quality> image format; 0xB4 codec bench; 0xB6 00 auto exposure,
                 0xB6 01 <integration u16> <analog gain u8> <digital gain u16> fixed exposure
 """
+import json
+import pathlib
 import struct
+import sys
 import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+# ../tools/devtools.py (J-Link tools, board reset; shared with the firmware scripts) for the
+# host scripts that import this module.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "tools"))
+
 DEVICE_NAME = "mustard"
-# All DKs advertise as "mustard"; pick one by J-Link serial number and BLE address.
+# All DKs advertise as "mustard"; pick one by J-Link serial number and BLE address
+# (ble_target(): on macOS a per-Mac UUID instead of the address).
 # nRF52840 DKs run fw/, nRF5340 DKs run fw_nrf5340/ (same BLE protocol).
 # rotate: degrees clockwise that make the picture upright (stereo.py), checked on real
 # pictures with the modules as they sit on the two 5340 DKs (10-07; right board 270, 10-08).
-# dk_board: the board's name for fw_nrf5340/tools/dk5340.ps1 -Board (stereo.py --flash).
+# dk_board: the board's name for fw_nrf5340/tools/dk5340.py --board (stereo.py --flash).
 BOARDS = {
     "hm0360": {"snr": "1050291681", "address": "C8:1A:80:9C:01:BC"},
     "hm01b0": {"snr": "1050221517", "address": "D6:25:79:FD:6A:6B"},
@@ -31,6 +39,23 @@ BOARDS = {
                     "device": "nRF5340_xxAA_APP", "family": "nrf53", "rotate": 270,  # user 10-08: 90 + 180
                     "dk_board": "HM0360B"},
 }
+# macOS: CoreBluetooth hides BLE addresses; bleak connects by a UUID that this Mac assigns to
+# each board. Kept per machine in boards.local.json (gitignored), {board: uuid}, written by
+# `python ble_identify.py`. The bridge (bridge.py) still uses the addresses above.
+LOCAL_BOARDS = pathlib.Path(__file__).resolve().parent / "boards.local.json"
+
+
+def ble_target(board: str) -> str:
+    """What bleak connects to for a board in BOARDS: its address, or on macOS its UUID."""
+    if sys.platform != "darwin":
+        return BOARDS[board]["address"]
+    uuids = json.loads(LOCAL_BOARDS.read_text("utf-8")) if LOCAL_BOARDS.exists() else {}
+    if board not in uuids:
+        raise SystemExit(f"{board}: no CoreBluetooth UUID on this Mac yet; run `python ble_identify.py` "
+                         f"(writes {LOCAL_BOARDS.name})")
+    return uuids[board]
+
+
 # J-Link device / nrfjprog family of the nRF52840 boards (entries without "device").
 DEFAULT_DEVICE = "NRF52840_XXAA"
 DEFAULT_FAMILY = "nrf52"
@@ -45,12 +70,20 @@ CMD_CODEC_BENCH = 0xB4  # next picture sent raw, PNG, JPEG q95 / 90 / 85 / 75 / 
 CMD_SET_EXPOSURE = 0xB6
 CMD_TIME_REFERENCE = 0xB5   # from the bridge only (fw_nrf5340/src/timesync.h)
 CMD_SNAPSHOT_AT = 0xB7      # picture at a bridge time T (bridge.Bridge.timed_write)
+CMD_TIMED = 0xB8  # timed capture: <mode u8> <period u16 ms>; mode 1 start, 0 stop (INTERFACES C2, F5)
 FORMAT_RAW, FORMAT_PNG, FORMAT_JPEG = 0, 1, 2
 FORMAT_NAMES = {FORMAT_RAW: "raw", FORMAT_PNG: "png", FORMAT_JPEG: "jpeg"}
 
 
 def set_format_command(fmt: int, quality: int = 0) -> bytes:
     return bytes([CMD_SET_FORMAT, fmt, quality])
+
+
+def timed_command(period_ms: int) -> bytes:
+    """0xB8: a picture every period_ms (100-60000); 0 stops."""
+    if period_ms == 0:
+        return bytes([CMD_TIMED, 0])
+    return bytes([CMD_TIMED, 1]) + struct.pack("<H", period_ms)
 
 
 def set_exposure_command(integration: Optional[int] = None, analog_gain: int = 0, digital_gain: int = 0) -> bytes:
@@ -67,6 +100,8 @@ FRAME_HEADER = struct.Struct("<HH")  # width, height (v1)
 HEADER_V2 = struct.Struct("<HHBBIIHHBHB")
 HEADER_COMMON_CLOCK = 0x01
 HEADER_MANUAL_EXPOSURE = 0x02
+HEADER_SKIPPED = 0x04  # 0xB8: at least one period skipped before this picture
+HEADER_TIMED = 0x10    # 0xB8: taken by the timed capture, not a 0xB2 request
 # Placeholder canvas size before the first frame header arrives.
 DEFAULT_SIZE = (320, 240)
 

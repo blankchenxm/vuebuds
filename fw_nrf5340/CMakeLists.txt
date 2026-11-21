@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20.0)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(vuebuds_nrf5340)
 
-# Compile-time choices, same names and values as fw/Makefile. dk5340.ps1 passes them as
+# Compile-time choices, same names and values as fw/Makefile. tools/dk5340.py passes them as
 # -Dfw_nrf5340_<var>=... (sysbuild hands image-prefixed variables to this image only).
 #   CAM_MODE          QVGA (default), QQVGA or VGA (HM0360 only)
 #   CAM_TEST_PATTERN  OFF (default), COLOR_BAR or WALKING_1

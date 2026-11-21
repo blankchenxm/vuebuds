@@ -10,9 +10,7 @@ import argparse
 import asyncio
 import collections
 import datetime
-import os
 import pathlib
-import subprocess
 import sys
 import threading
 import time
@@ -22,9 +20,9 @@ import numpy as np
 from bleak import BleakClient, BleakScanner
 
 import protocol
+import devtools  # ../tools (path set by protocol)
 
 HERE = pathlib.Path(__file__).resolve().parent
-JLINK_DIR = pathlib.Path(os.environ.get("JLINK_DIR", r"C:\Program Files\SEGGER\JLink"))
 WINDOW = "vuebuds viewer"
 
 
@@ -55,17 +53,10 @@ class RttTap:
         self.out_file = out_file
         self._stop = threading.Event()
         if reset:
-            # Reset before attaching so the log starts at boot; nrfjprog and the logger can't share the probe.
-            probe = ["--snr", snr] if snr else []
-            rc = subprocess.run(["nrfjprog", "-f", family, *probe, "--reset"], capture_output=True).returncode
-            log("rtt", f"target reset (nrfjprog rc={rc})")
-        if out_file.exists():
-            out_file.unlink()
-        probe = ["-USB", snr] if snr else []
-        self._proc = subprocess.Popen(
-            [str(JLINK_DIR / "JLinkRTTLogger.exe"), *probe, "-Device", device, "-If", "SWD",
-             "-Speed", "4000", "-RTTChannel", "0", str(out_file)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+            # Reset before attaching so the log starts at boot; the reset tool and the logger can't share the probe.
+            rc = devtools.reset_board(snr, family)
+            log("rtt", f"target reset (rc={rc})")
+        self._logger = devtools.RttLogger(snr, device, out_file)
         self._thread = threading.Thread(target=self._tail, daemon=True)
         self._thread.start()
 
@@ -87,7 +78,7 @@ class RttTap:
 
     def close(self):
         self._stop.set()
-        self._proc.kill()
+        self._logger.stop()
         self._thread.join(timeout=1)
 
 
@@ -210,7 +201,7 @@ def save_frame(frame: protocol.Frame, out_dir: pathlib.Path) -> pathlib.Path:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", default=protocol.DEVICE_NAME)
-    ap.add_argument("--address", help="BLE address; skips the name scan")
+    ap.add_argument("--address", help="BLE address (macOS: CoreBluetooth UUID); skips the name scan")
     ap.add_argument("--board", choices=sorted(protocol.BOARDS),
                     help="known DK: sets --address and the J-Link used by --rtt / --reset")
     ap.add_argument("--scale", type=int, default=2, help="display upscale factor")
@@ -220,7 +211,7 @@ def main():
     ap.add_argument("--snapshot", help="save the last rendered view to this PNG on exit")
     args = ap.parse_args()
     board = protocol.BOARDS.get(args.board, {})
-    args.address = args.address or board.get("address")
+    args.address = args.address or (protocol.ble_target(args.board) if args.board else None)
 
     stamp = f"{datetime.datetime.now():%Y%m%d-%H%M%S}"
     log = SessionLog(HERE / "logs" / f"session-{stamp}.log")

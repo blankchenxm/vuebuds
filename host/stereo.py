@@ -50,7 +50,7 @@ class BoardLink:
     def __init__(self, side: str, board: str, log: SessionLog, on_frame: Callable[[str, protocol.Frame], None]):
         self.side = side
         self.board = board
-        self.address = protocol.BOARDS[board]["address"]
+        self.address = protocol.ble_target(board)  # macOS: CoreBluetooth UUID
         self.log = log
         self.status = "starting"
         self.fresh = False  # connected and no picture taken yet: the next one includes the camera init
@@ -344,8 +344,8 @@ def save_pair(pair: Pair, images: dict[str, np.ndarray], rotations: dict[str, in
 
 
 def flash_boards(mode: str, boards: dict[str, str], log: SessionLog) -> bool:
-    """Build fw_nrf5340 (stream app) in the given mode and flash it to both boards via dk5340.ps1."""
-    script = HERE.parent / "fw_nrf5340" / "tools" / "dk5340.ps1"
+    """Build fw_nrf5340 (stream app) in the given mode and flash it to both boards via dk5340.py."""
+    script = HERE.parent / "fw_nrf5340" / "tools" / "dk5340.py"
     for side in SIDES:
         dk_board = protocol.BOARDS[boards[side]].get("dk_board")
         if dk_board is None:
@@ -353,8 +353,7 @@ def flash_boards(mode: str, boards: dict[str, str], log: SessionLog) -> bool:
             return False
         log("host", f"flashing {mode} to the {side} board ({dk_board}); the first build of a mode takes 1-2 min...")
         t0 = time.monotonic()
-        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
-                            "flash", "-Mode", mode, "-Board", dk_board],
+        r = subprocess.run([sys.executable, str(script), "flash", "--mode", mode, "--board", dk_board],
                            cwd=script.parent.parent, capture_output=True, text=True, errors="replace")
         if r.returncode != 0:
             tail = "\n".join((r.stdout + r.stderr).strip().splitlines()[-15:])

@@ -24,6 +24,7 @@
 void imagePrepare(const camera_frame_t *frame);
 /* Sends the prepared frame in the current format; false if it was not sent. */
 bool imageSend(const camera_frame_t *frame);
+void imageAddFlags(uint8_t flags);  // BLE_HEADER_*, between imagePrepare() and imageSend()
 void imageCommand(const ble_command_t *cmd);
 
 #endif

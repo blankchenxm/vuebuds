@@ -5,6 +5,141 @@
 
 ---
 
+## 2026-11-20 · PSRAM 改走 QSPI 进 main + 开机自检(PR #60,Issue #59)
+
+- **阶段**:硬件 / 驱动(工作台 hub #39 第 1 步;F1)
+- **改了什么**:
+  - `src/psram.c` / `.h`:APS6404L 从 SPIM4 8 MHz(P1.12–P1.15)改到 QSPI(nrfx,CE# P0.18、SCK P0.17、SIO0–3 P0.13–P0.16;10-14 写的,11-19 / 11-20 两块板验收)。默认单线 `0x0B` / `0x02`、48 MHz、32 B 一段(CE# 低约 6.6 µs < tCEM 8 µs),约 2.7 MB/s;四线能用但杜邦线上四根同时为高时读坏,不用。地址不对齐走中转缓冲;ID 读不回时用 GPIO 发 QPI 退出 + 复位。
+  - **开机自检**(新,Xiaomeng 11-20 定):开机写 4 × 1 KB(分散在 0、2.7 MB、5.3 MB、8 MB 末尾,内容随地址变,地址线混叠也查得出),马上读一次,`PSRAM_CHECK_WAIT_MS = 2000` 后再读一次;不过 → `psramPresent()` 为假,压缩输出退回片内 RAM,RTT 打印 `[psram] boot check: … FAILED (…), using on-chip RAM`,状态分"读不到 ID / 写完马上就错(接线、时钟)/ 2 s 后才错(保持)"。
+  - `src/main.c`:开机 `psramCheckStart()`(写 + 第一次读,约 2 ms),k_timer 2 s 后发 `EVENT_PSRAM_CHECK`,主线程做第二次读;`src/event.h` 加这个事件;`src/image.c` 第一次要用 PSRAM 时调 `psramCheckFinish()`(还没到 2 s 就等到 2 s)。
+  - `src/hw_test.c`:[4] INT(P1.12)、[5a]–[5j] QSPI PSRAM(接线、ID、单线 / 四线 8–96 MHz、引脚上量 CE# 低电平时间、8 MB × 2、不对齐读写、四线诊断);`HW_TEST_QUAD_DRIVE` 四线驱动强度扫描。
+  - `src/pins.h`:FSIN P1.11、TRIGGER P0.25、INT P1.12;设备树关掉板载 MX25R64 / qspi 节点(我们的 DK 上 SB10–15 已断开);`prj.conf` 开 `CONFIG_NRFX_QSPI`。
+- **为什么**:main 的 SPIM4 驱动在改线后读不到 PSRAM,压缩输出退回 RAM,VGA JPEG q85 放不下(PR #58 遗留)。开机自检:HM0360B 11-19 的故障是写进去后 1–3 s 才开始翻位、写完马上读是对的,不等查不出来。
+- **和原代码的行为差异**:
+  - PSRAM 引脚和外设换了(SPIM4 → QSPI);P1.12 现在是相机 INT。
+  - **开机不多等**:BLE 照常在约 0.3 s 广播;但开机 2 s 内第一张要压缩的图会等自检做完(最多约 2 s)。原始格式、不压缩的图不等。
+  - 自检会覆盖 PSRAM 里那 4 KB(开机时 PSRAM 里本来就没有要保留的东西)。
+- **验证**:
+  - 自检:两块板开机都是 `4 x 1024 B written, 0 wrong at once, 0 wrong 2005 ms later: OK`;临时编译开关在两次读之间改 4 个字节(没提交)→ `4 wrong 2005 ms later: FAILED (lost bits after the wait: retention), using on-chip RAM`。
+  - HW_TEST:左板 11-20 晚上全部单线项、8 MB × 2、不对齐读写 0 错;右板 11-20 下午同样全部通过(hub #26)。四线 [5d] / [5e] 两块板都不过(杜邦线,预期)。
+  - 左板 [5c](64 B 一段)晚上那次每档约一半错:查明是芯片停在 **32 B 回绕模式**(`0xC0` 切换,软件复位 `0x66 / 0x99` 能清掉;发一次 `0xC0` 后 64 B 读写 16 段全部是回绕特征)。是上一次 HW_TEST 四线项发的乱码切进去的;只跑 PSRAM 项时 [5c] 两次都 0 错。默认 32 B 一段、对齐到 32 B 格子,回绕模式不影响。完整流程里开机复位后为什么仍在回绕模式没查清(那一刻摄像头在出帧)。
+  - 经桥(两块板同时,QVGA,`timed_capture.py` 2 s):原始和 JPEG q85 都 0 丢包。
+  - **定时拍重测**(两块板经桥同时拍,`timed_capture.py`,QVGA 每种 20 s、VGA 30 s;间隔按帧头拍摄时间,左 / 右板):
+
+    | 分辨率 / 格式 | 设 500 ms | 设 1000 ms | 设 2000 ms | 每张大小 左 / 右 · 收齐 |
+    |---|---|---|---|---|
+    | QVGA 原始 | 1517 / 1944 ms | 2000 / 2000 | 1983 / 2000 | 76800 B · 1.2–1.4 s |
+    | QVGA JPEG q85 | **502 / 603 ms**(11-19 约 1000) | 1000 / 1000 | 1988 / 2000 | 4.5–6.4 KB / 15 KB · 0.06–0.1 / 0.26 s |
+    | **VGA JPEG q85** | 1501 / 2000 | 2000 / 2000 | **2001 / 2000** | 14 KB / 46 KB · 0.22 / 0.8 s |
+    | VGA JPEG q60 | — | 2001 / 2000 | — | 8.5 KB / 24 KB · 0.13 / 0.39 s |
+    | VGA JPEG q95 | — | 1975 / 3000 | — | 35 KB / 99 KB · 0.54 / 1.65 s |
+    | VGA 原始 | — | — | 5969 / 6689 | 307200 B · 4.9–5.1 s |
+
+    全部 0 丢包。**VGA JPEG q85 现在能发了**(PR #58 时输出满、退回原始);VGA 最快 2 s 一张(唤醒 + 曝光约 0.7 s、编码约 0.3 s,再加发送)。右板场景亮、图大,所以慢一些。
+  - **VGA JPEG q95 偶尔出坏图**(两块板都有,约 30 张里 0–2 张,OpenCV 报 `Corrupt JPEG data: N extraneous bytes before marker 0xdN`):临时在固件里记编码器写出的 CRC、从 PSRAM 读回两遍的 CRC,放进帧头让电脑比 —— 坏图这三个 CRC 和电脑收到的完全一致,**所以不是 PSRAM,是编码器在 q95 时自己写出了坏的一段**(多半是 PR #44 的数值质量补丁:q95 量化表很小,系数超出基线霍夫曼表的范围)。q85 约 95 张、q60 32 张没见过。另开 Issue。
+- **遗留 / 下一步**:
+  - 状态命令(C2 草案 PR #28)里加 PSRAM 自检结果,改 #28 时一起提。
+  - HW_TEST [5c] 偶尔被上一次的回绕状态影响;要的话 [5c] 前补一次复位。
+  - JPEG q95 坏图(编码器,见上);左板 HM0360 偶尔有一条亮度台阶(sw-mac 11-20 报的,main 上也有,像自动曝光在一帧读出中途改了),记在 hub #39 第 3 步的曝光测试里。
+  - 右板环形缓存补测、环形缓存各种设置(hub #39 第 2 步)。
+
+## 2026-11-19 · 定时拍 0xB8:拍摄周期运行时可调(PR #58,Issue #57)
+
+- **阶段**:新功能(工作台 hub #6 F5;接口 hub PR #24,Xiaomeng 同意,`a2f88e1`)
+- **改了什么**:
+  - `src/snapshot.c` / `.h`:`0xB8 01 <周期 u16 ms>` 每 P ms 拍一张(k_timer,32.768 kHz,第一张马上拍),流程和 `0xB2` 相同(S2 唤醒 → 第 1 帧 → 按 `0xB3` 压缩 → 发 → 睡);`0xB8 00` 停;运行中再发换周期。**到点时上一张还在拍或发,就在定时器中断里记一次跳过、不排队**,下一张帧头标志 `0x04`;定时拍的帧标志 `0x10`(插进来的 `0xB2` 没有)。
+  - `src/main.c`:`0xB8` 交给 snapshot(推流 `0xB1` 时忽略);`src/event.h` 加 `EVENT_CAMERA_TIMED`;`src/ble.h` 加两个帧头标志;`src/image.c` 加 `imageAddFlags()`。
+  - `host/protocol.py`:`CMD_TIMED`、`timed_command()`、`HEADER_SKIPPED` / `HEADER_TIMED`;`host/timed_capture.py`(新):经桥给两块板开定时拍,统计实际周期(帧头拍摄时间)、跳过、丢包。
+- **为什么**:F5,拍摄周期(0.5 / 1 / 2 s)和压缩运行时可选;压缩本来就能用 `0xB3` 运行时改。
+- **和原代码的行为差异**:新命令;原有命令行为不变。第一版的跳过放在主线程处理事件时判断,主线程发帧时阻塞,结果到点的事件排队、下一张"晚拍"(原始 QVGA 500 / 1000 ms 实际约 1.3 s 一张、不在周期点上),不符合接口"跳过不排队";改成在定时器中断里判断。
+- **验证**(两块板经桥同时拍,`timed_capture.py`,每种 20 s,VGA 30 s;间隔按帧头拍摄时间,去掉第 1 张):
+
+  | 分辨率 / 格式 | 设 500 ms | 设 1000 ms | 设 2000 ms | 每张大小 / 收齐 |
+  |---|---|---|---|---|
+  | QVGA 原始 | 1500 ms(每 3 个周期 1 张) | 2000 ms | **2000 ms** | 76800 B / 1.2 s |
+  | QVGA JPEG q85 | 约 1000 ms(两块板同时);**单板 500.0 ms、0 跳过** | **1000 ms** | **2000 ms** | 12–19 KB / 0.2–0.3 s(单板 0.13 s) |
+  | VGA 原始 | 约 6000 ms | 6000 ms | 6000 ms | 307200 B / 4.8 s |
+  | VGA JPEG q85 | — | — | — | 放不下,退回原始(见遗留) |
+  | VGA JPEG q60 | — | 约 1900–2000 ms | — | 22–30 KB / 0.35–0.46 s |
+
+  - 所有设置 0 丢包;跳过的张数和帧头标志 `0x04` 一致。右板间隔 ±0.1 ms 对准周期;左板 ±50–200 ms(拍摄时间是 FVLD 上升,唤醒到 FVLD 主要是曝光时间,左板场景暗、曝光变化大)。
+  - 一张 QVGA JPEG q85 的时间:唤醒 → 采完 220 ms、编码 78 ms(64 MHz)、经桥发送单板 0.13 s / 两块板同时 0.28 s;所以 0.5 s 只有单板跟得上。
+- **遗留 / 下一步**:
+  - **VGA JPEG q85 现在发不出去**:PSRAM 已改接 QSPI,main 的 SPIM4 驱动读不到,压缩输出退回 RAM,VGA 时只剩约 45 KB(q85 一张约 60–80 KB,输出满了就发原始帧;q75 看场景,q60 放得下)。要等 `feat/psram-qspi` 合并,而合并要等 HM0360B 的 PSRAM 接线修好(hub #6)。
+  - 0.5 s 两块板同时 QVGA JPEG:可试 `CPU_128MHZ`(编码快一倍,是否默认待定)或更低质量。
+  - 断开连接时板子照旧重启,定时拍停止(INTERFACES C2)。
+
+## 2026-11-19 · 桥:板子重连后订阅被清掉就重新订阅(PR #56,Issue #55)
+
+- **阶段**:修 bug(工作台 hub #6 ④,sw-mac 报)
+- **改了什么**:`fw_bridge/src/central.c`:
+  - 订阅取消回调(`onNotify` 收到 `data == NULL`):原来只打 `notifications off` 并把 `value_handle` 清 0;现在记下"订阅已移除",**如果这块板的连接还在,就在工作队列里重新订阅**(`resub`),订阅成功后再发一次 `ready` 事件。
+  - `subscribe()`:订阅参数还在协议栈的列表里(上一条连接的订阅没清完)时不重用它,等它的取消回调再订阅;`bt_gatt_subscribe` 返回 `-EALREADY` 不再当成功(原来当成功,但这时并没有写 CCC)。
+- **为什么**:sw-mac 发现板子刚重连、`ready` 后马上发命令时,桥会打出 `notifications off`,之后那块板的数据全没了。复现:J-Link 复位两块板(链路超时断开)后马上发 `0xB3 / 0xB6 / 0xB2`,12 次重连里 1 次在 `ready` 后 0.01 s 出现 `notifications off`,那块板收不到图(用 `X` 正常断开时 16 次都没出现)。Zephyr 的订阅按对方地址记,最可能是上一条连接的清理晚到,清掉了新连接的订阅。
+- **和原代码的行为差异**:订阅被清掉而连接还在时,桥自己重新订阅,并多发一次 `ready`(电脑端照常处理)。正常断开时不变。
+- **验证**(MacBook,两块 5340 + 桥):
+  - 修前:复位 6 轮 12 次重连,1 次收不到图;修后:复位 20 轮 40 次重连 **0 次**(其中 1 次晚到的 `notifications off` 照样出现,桥重新订阅后那块板照常收到图);`X` 断开 6 轮 0 次。
+  - 吞吐 `ble_bench.py --bridge` 30 s:57 / 60 KB/s、0 丢包(修前 58 / 60)。
+- **遗留 / 下一步**:电脑端 `bridge.py --stream` 不等新连接就绪(复位后旧连接要 4 s 超时,`wait_ready` 会把它当成就绪),那种情况下仍会 0 帧;`ble_bench.py` / `stereo.py` 已经处理。
+
+## 2026-11-19 · balsamic3(V3)上板测试固件 fw_v3_test 进 git + 跨平台脚本(PR #54,Issue #53,工作台 #13 / #6)
+
+- **阶段**:工具 / 新硬件
+- **改了什么**:`fw_v3_test/`(新,11-15 在 Windows 上写、之前没进 git):`src/main.c`(V3 上板自检:MAX77650 PMIC、APS6404L PSRAM、HM0360 I2C / MCLK、LED、电源键,RTT 逐项 PASS / FAIL)、`boards/nrf5340dk_nrf5340_cpuapp.overlay`(DK 设备树改成 ISP2053 模块)、`boards/v3_module.overlay`(给别的程序叠加用,例如在 V3 上跑 `fw_nrf5340`)、`tools/v3test.ps1`(编译 / 烧录 / RTT)、`.gitignore`(`build*/`、`build_logs/`)。
+- **为什么**:固件开发搬到 MacBook(工作台 Issue #13 / #14,用户 11-18),Mac 只能从 GitHub 拉代码。
+- **和原代码的行为差异**:无(新目录,不改 `fw/`、`fw_nrf5340/`)。
+- **验证**:只提交 11-15 在 V3 板上跑过的源码,这次没有重新上板。
+- **11-19(fw-mac,hub #6 F1)**:并入 main;`tools/v3test.ps1` 换成 `tools/v3test.py`(用 `tools/devtools.py`,Mac / Windows 都能跑,和 `dk5340.py` 一样),参数 `build | flash | rtt | run [--seconds 70] [--snr 53001982] [--pristine]`。差异:烧录的 runner 按 `devtools.flash_runner()`(Mac 上 nrfutil);RTT 改用 J-Link Commander 的 RTT telnet(同 PR #51),先复位再接上(原来先接 logger 再复位),SWD 1 MHz 不变。
+- **遗留 / 下一步**:Mac 上只验证了编译(V3 板子和 J-Link EDU Mini 不在这台 Mac 上),烧录 / RTT 等板子接上再测。
+
+## 2026-11-19 · 离线比较与实时双目视觉 DEMO(PR #47,Issue #46;10-12 写成,11-19 合并)
+
+- **阶段**:演示工具，接续 Claude 已确认的 Gradio 方案。
+- **改了什么**:增加 `host/demo.py` 两页界面、`demo_core.py` 拍摄/拼接/烧录编排、`demo_vlm.py` 五模型流式接口、`demo.ps1` 启动器和独立回归测试。
+- **界面调整**:两个 DEMO 标签页统一为英文，放大标题、正文、操作按钮和图片预览，并增加分区留白；进度和错误提示也改为英文。
+- **为什么**:在窗口中比较现有图片的拼接和 VLM，并一键演示双板拍照、自动拼接、视觉理解与各段延迟。
+- **行为**:复用现有 0xB2 拍照与压缩/曝光命令；不改固件。依次尝试并采用首个合格拼接，全失败则回退原图。DEMO 首次连接及失败重试前释放旧 BLE 连接，避免混入旧请求。未同步的板端时钟不用于测拍摄时间差。
+- **验证**:13 项确定性回归通过；浏览器离线切换/重算/两种 VLM 输入和实时保存回读通过；5 个模型均实际流式返回；QVGA/VGA 真实照片运行全部 9 种拼接。双板 QVGA/VGA 编译烧录通过，右板 raw/PNG/JPEG 五档均正确解码、0 丢包。左板最初 I2C 无响应，用户重新接线后浏览器端到端通过：QVGA q85 左/右收齐 0.376/0.349 s，拼接失败按约定回退原图；VGA q85 同步曝光左/右寄存器相同（169/0/256，右板 manual），收齐 1.183/1.505 s，SIFT 71 ms / 70 内点后用拼接图完成 VLM；两档均 0 丢包。Qwen 首字/总耗时：QVGA 双原图 2.764/6.584 s，VGA 拼接图 7.429/39.950 s（单次测试，非基准）。仓库未配置 CI。
+- **遗留 / 下一步**:时钟同步仍在独立 `feat/time-sync` 分支；本 PR 不合入。
+- **11-19 合并前(fw-mac,hub #6 F1)**:并入 main(PR #51 起脚本跨平台);界面里的"编译烧录"改调 `fw_nrf5340/tools/dk5340.py`(原来调已删的 `dk5340.ps1`),Mac 上直接 `host/.venv/bin/python host/demo.py`(`demo.ps1` 仍给 Windows 用)。Mac 上的验证见 PR #47 的评论。
+
+## 2026-11-18 · 固件开发搬到 MacBook:跨平台脚本 + macOS BLE(PR #51,Issue #50)
+
+- **阶段**:工具(工作台 hub #14,fw-win → fw-mac)
+- **改了什么**:
+  - `tools/devtools.py`(新):找 NCS v3.2.1(`nrfutil sdk-manager toolchain env`,否则 `NCS_DIR` / `D:\NRFSDK` + 工具链 `66cdf9b75e`)、空格路径(Windows `subst V:`,Mac 符号链接 `~/.cache/vuebuds-src/<hash>`,**源码目录要显式传给 west**,传 `.` 会被 getcwd 解析回带空格的真实路径)、J-Link 工具(`JLINK_DIR`,否则 `/Applications/SEGGER/JLink` 或 `C:\Program Files\SEGGER\JLink`)、复位(有 nrfjprog 用它,否则 `nrfutil device reset`)、RTT。
+  - `fw_nrf5340/tools/dk5340.py`(新,替代 `dk5340.ps1`,已删):`build / flash / rtt / run / camera`,参数同原脚本(`--board --mode --color-bar --monitor --period-ms --cflags --pristine --seconds`),编译目录名不变;`camera` = 复位 + `viewer.py --rtt --reset` + 截图。
+  - `fw_bridge/tools/bridge_fw.py`(新,替代 `bridge.ps1`,已删):`build / flash / rtt`。
+  - `host/`:`viewer.py`、`ble_bench.py`、`codec_bench.py` 的 J-Link 路径和复位改用 `devtools`;`stereo.py --flash` 调 `dk5340.py`;`protocol.ble_target()`:Windows / Linux 照旧按 MAC 连,**macOS 按本机 UUID**(`boards.local.json`,gitignore);`ble_identify.py`(新)认板子。`requirements.txt` 加 `pyserial`。
+  - `fw_nrf5340/tools/ncs_env.sh` 支持 macOS;README(`fw_nrf5340`、`fw_bridge`、`host`)和 `CLAUDE.md`(会话名 `fw-mac`、Mac 环境一节)更新。
+- **为什么**:Xiaomeng 11-18 在 hub 定:固件开发搬到 MacBook,"改固件 → 烧录 → Mac 客户端验证"在一台机器上闭环;脚本两边都要能跑。
+- **和原代码的行为差异**(固件没改):
+  - **RTT 不再用 JLinkRTTLogger**:V9.96 在 Mac 上对 nRF5340 一直报 `RTT Control Block not found`(加 `-RTTAddress 0x20001010` 也一样),而 J-Link Commander 能找到。改成 Commander 连上(不暂停 CPU)+ 读它的 RTT telnet 端口(每个实例一个空闲端口,两块板可同时抓),Windows 上也走这条路。日志文件内容相同(去掉 telnet 开头的横幅行)。
+  - 本工具开的 J-Link 会话都 `exec DisableAutoUpdateFW`(见下面板载 J-Link 固件升级)。
+  - Mac 上没有 nrfjprog:复位用 `nrfutil device reset`,烧录 `west flash --runner nrfutil`(有 nrfjprog 时仍用 nrfjprog;`WEST_RUNNER` 可改)。
+  - 桥的烧录从 `nrfjprog --program merged.hex --sectorerase --verify --reset` 改成 `west flash`(同样只擦固件占用的扇区、校验、复位)。
+  - 脚本参数从 PowerShell 风格(`-Mode`)变成 `--mode`。
+- **验证**(MacBook,M 系列,macOS 26):
+  - 编译(同 `fb6b10e` 的固件源码,`--pristine`)和 Windows 基线(hub #13)**逐字节一致**:QVGA / VGA 应用核 FLASH 158216 B、RAM 55508 B;网络核 171352 B / 45416 B;桥 181996 B / 93552 B。
+  - 两块 5340 板按 SN 烧录(`nrfutil`,两核都校验通过);RTT:两块板都抓到开机日志(地址 `DA:E7:DE:69:E3:5E`、`EA:F1:6D:2A:C0:BB` 与原来一致),桥也抓到。
+  - `ble_identify.py` 认出两块板的 UUID(一次通过)。
+  - `dk5340.py camera`(viewer,QVGA 推流 20 s):两块板各 20 帧、0 丢包、每帧 DMA `38400 38400`,约 1.2 fps(Windows 直连约 1 fps)。
+  - `stereo.py --flash QVGA --auto 3`:先经 `dk5340.py` 给两块板各烧一次(约 39 s / 块),再拍 3 对、全部保存、0 丢包。左板每张约 4.7 s、右板约 0.8 s(Mac 给两条连接的间隔不同,和 Windows 双连时的不均衡类似;桥模式不受影响)。
+  - 经桥(11-19,桥 DK 的 nRF USB 口接到 Mac 后出现 `/dev/cu.usbmodem1101`,VID 0x2FE3 "VueBuds bridge"):`stereo.py --bridge --auto 3` 两块板都经桥连上(间隔 15 ms、PHY 2M、MTU 498),拍 4 对(第 1 对预热)、存 3 对、0 丢包,每张约 1.5 s,左右一致;`ble_bench.py --bridge --board hm0360-5340 hm0360b-5340 --duration 30` 两块板 0.77 / 0.80 fps、58 / 60 KB/s(合计 118 KB/s,和 PR #40 的桥上限 110–116 KB/s 一致)、0 丢包、固件 0 坏帧;`bridge.py --stream` 两块板各 7 帧 / 10 s。
+  - 注意:`bridge.py --stream` 前板子这次开机要没用过 0xB2(固件一次开机只接受 0xB1 / 0xB2 其中一种),也不要刚用 `nrfutil` 复位完就跑(旧连接要 4 s 才超时,`wait_ready` 会把它当成已就绪),否则收到 0 帧;`ble_bench.py` 自己处理了这两点。
+- **遗留 / 下一步**:
+  - J-Link V9.96 第一次连两块 5340 DK 时自动升级了板载 J-Link 固件(Jul 2025 → Jun 2026):第一次连 HM0360 板时失败(bootloader 超时),第二次成功;HM0360B 板第一次连上时已经停在 bootloader,随后升级成功。两块现在都正常。桥那块 DK 没升(之后的会话都禁止自动升级)。
+  - `fw/`(52840 旧固件,Makefile)、`fw/tools/dk.ps1`、`codec_test`(MinGW)没有移植,Mac 上暂不能用。
+
+## 2026-11-17 · CLAUDE.md 加入工作台协作规则(PR #49,Issue #48)
+
+- **阶段**:文档
+- **改了什么**:`CLAUDE.md` 开头加"工作台(跨模块协作)"一节,内容来自工作台仓库 `snippets/module-claude-md-block.md`:本仓库 = 固件(fw)模块,会话名 `fw-win`,任务标签 `needs:fw`,工作台本机 clone 在 `D:\Projects\Proactive camera agent\proactive-av-agent-hub`。11-18 按工作台 PR #10 / #12 的新段落补两条:**hub 派的 `needs:fw` Issue 直接做**(`decision`、改接口、待定内容、不可逆操作、改权限仍要用户本人),**回执**(回来信会话一句 + Issue 评论 + `doing` / `blocked` 标签)。
+- **为什么**:四个模块仓库(vuebuds、kicad-agent-flow、数据 / 模型、Mac 管线)改成在工作台仓库 `blankchenxm/proactive-av-agent-hub` 里协作(见其 `COLLAB.md`):开工前看 `STATUS.md` 和 `needs:fw` 的 Issue,交接走 `handoff` Issue,跨模块接口先改 `INTERFACES.md`。后两条是用户 11-18 在 hub 定的,并在 fw-win 里确认改本文件。
+- **和原代码的行为差异**:无(只改文档)。
+- **验证**:无需上板。
+- **遗留 / 下一步**:跨机器会话消息(Remote Control)还没在三台机器上实测(`COLLAB.md` §6 第 4 步)。
+
 ## 2026-10-11 · 板上压缩(JPEG / PNG)+ PSRAM 驱动 + 压缩测试命令(PR #44,Issue #43)
 
 - **阶段**:硬件优化计划阶段 3(压缩)+ PSRAM P2(驱动,用作编码输出)
@@ -74,6 +209,40 @@
   - MTU 498 定版后晚上(18:50)复测:桥单板 1.33–1.37 fps(上午同配置 1.56),Windows 直连 1.08 fps(和上午一样);这时 7.5 / 15 / 30 ms 三种间隔都约 1.36 fps。配置相同,差异归为时段 / 无线环境,原因没查清。双板 15 ms:0.71 / 0.74 fps,两块一样。
   - 定版(用户 10-11):**桥默认间隔 15 ms**(单板时间隔影响很小;双板 15 ms 均衡)、**相机 MTU 498**。
 - **遗留 / 下一步**:FSIN 每 250 ms 一个脉冲时丢脉冲的原因;桥 RTT 里 Windows 枚举时的 `udc: Failed to allocate net_buf 4095`(端口正常)。下一阶段:帧头 v2。
+
+## 2026-10-10 · 10-09 双目照片:多种拼接方法 + VLM 能看清多少(PR #38,Issue #37)
+
+- **阶段**:工具 / 评估(计划见 Obsidian `10.5~10.11/HM0360图片sititch尝试.md`、`HM0360图片VLM理解.md`)
+- **改了什么**:
+  - `host/stitch.py`:改成多方法:基线 `opencv`(PANORAMA)、`opencv_scans`、`orb`(论文);更强的匹配 `sift`、`asift`(OpenCV 5 没有 AKAZE,换成 ASIFT,抗视角变化)、`lightglue`(SuperPoint + LightGlue)、`loftr`(kornia,稠密匹配);抗视差 `apap`(Moving DLT,每 10 px 一个局部单应)、`multi_h`(顺序 RANSAC 找多个平面,每格选最近的那个;Warping Residual 的简化版)。匹配类方法沿用论文的"一个单应 + 左图直接盖上去";apap / multi_h 用羽化融合(错位会显示成重影)。每对目录写 `stitch_<方法>.png`、`matches_<方法>.png`(绿 = 内点、红 = 外点)、`compare.png`、`stitch_results.json`;集合目录写 `stitch_summary.csv` 和人工评分表 `stitch_score.csv`(只追加新行,不覆盖已填的分)。`--methods` 只重跑部分方法时和已有结果合并。lightglue / loftr 需要 torch(可选依赖,没装就跳过)。
+  - `host/vlm_eval.py`(新):左右两张原图放在同一次请求(Image 1 = 左、Image 2 = 右),英文提示词,temperature 0;任务 A(尽量详细描述、逐字转写文字、看不清写 [unreadable])、任务 B(手握 / 手指的是哪个物品 + 特征,只跑 `<集合>/eval_config.json` 里列出的对)。后端:OpenRouter(key 从环境变量或 `host/.env`,已 gitignore)、本地 Ollama。结果写 `<对>/vlm/<模型>_<任务>.json`、`<集合>/vlm_summary.csv`;429 限流时退避重试(30 s 起,最多 6 次)。
+  - `host/vlm_score.py`(新):和 `<集合>/truth.json` 对比打分:按字号分组的文字召回、"编造词"(模型说读到、但任何真值文字里都没有的词)、物品召回、任务 B 目标对不对。
+  - `host/.gitignore` 加 `.env`;`host/requirements.txt` 写明可选的 torch / kornia / lightglue(CUDA 版要从 PyTorch 的 cu128 源装,PyPI 只有 CPU 版)。
+- **为什么**:用户 10-09 要求:试各种(优先不用 GPU 的)方法把左右图拼成一张正常的图;测 QVGA / VGA 下 VLM 能看清多小的字、能否判断手指的物品。
+- **和原代码的行为差异**:只有电脑端工具;`stitch.py` 的 `orb` / `opencv` 结果不变,默认方法从 2 种变成 9 种。
+- **验证**(数据:`20261009_QVGA` 15 对、`20261009_VGA` 12 对,照片不进 git):
+  - 拼接成功率(自动判定,不代表好看):
+    | 方法 | opencv | scans | orb | sift | asift | lightglue | loftr | apap | multi_h |
+    |---|---|---|---|---|---|---|---|---|---|
+    | QVGA | 5/15 | 4/15 | 4/15 | 11/15 | 15/15 | 15/15 | 15/15 | 11/15 | 11/15 |
+    | VGA | 8/12 | 7/12 | 9/12 | 11/12 | 11/12 | 12/12 | 11/12 | 11/12 | 11/12 |
+  - 看图:物品摆在同一张桌上时多数方法都能拼成一张完整的图;手离得近,apap / multi_h 里有重影。好坏等用户在 `stitch_score.csv` 打分。
+  - VLM(只跑了 OpenRouter 上有的 Qwen3-VL-8B、Qwen3.5-9B;真值是 Claude 起草的草稿,待用户核对):
+    | | 大字召回 | 中字 | 小字 | 编造词 / 次 | 任务 B 目标正确 |
+    |---|---|---|---|---|---|
+    | Qwen3-VL-8B QVGA | 0.92 | 0.23 | 0.19 | 2.9 | 6/9 |
+    | Qwen3-VL-8B VGA | 1.00 | 0.88 | 0.68 | 1.8 | 5/5 |
+    | Qwen3.5-9B QVGA | 0.96 | 0.25 | 0.19 | 2.9 | 6/9 |
+    | Qwen3.5-9B VGA | 1.00 | 0.78 | 0.73 | 0.8 | 5/5 |
+    QVGA 下中小字基本读不出,而且会编(把 KRYLON 读成 RAYLYN / HAYLON,把喷漆说成 "Aussie 护发喷雾");VGA 下中字读出约 80–90%、小字约 70%。
+- **10-11 追加:本地 3 个模型 + 手机照片对照**:
+  - Ollama 0.40 装在 D 盘(`D:\Ollama`,模型 `D:\OllamaModels`,约 18 GB),跑 Qwen2.5-VL-7B、MiniCPM-V 4.5、Gemma 4 E4B(RTX 4060,每次 10–50 s)。Moondream 3 这轮不测(用户决定)。
+  - `vlm_eval.py`:本地模型加 `repeat_penalty 1.15`(temperature ≈0 时 Qwen2.5-VL / MiniCPM 会无限重复 "ALMOND ALMOND …" 直到 token 上限,QVGA 第一次跑约一半回答是这样,已全部重跑);Gemma 4 关掉思考(`think: false`,否则思考吃掉大部分 token 预算、正文被截断);`num_ctx 8192`;新增单张图模式(目录里放 `image.png`,用单图提示词)。**本地模型和 API 模型的解码设置不同(repeat_penalty)**。
+  - `host/make_phone_eval.py`(新):用户 10-11 加了 6 个单物品的手机照片(`captures/20261009_phone`,5712×4284),生成 4 个版本:彩色 / 灰度长边 2048、灰度 640×480、灰度 320×240(后两个 = 和 VGA / QVGA 一样多的像素,但没有 HM0360 的镜头 / 噪声)。
+  - 真值改成 **Claude 读手机原图(全分辨率局部)** 的结果,不再用 VGA 图起草;饼干盒手机拍的是另一面,前面分开记;每段文字估了在各图里的大写字母像素高度(±30 %)。`vlm_score.py` 加按像素高度统计"读出率"(`vlm_text_hits.csv`)。
+  - 结果见 Obsidian `HM0360图片VLM理解.md` §9。要点:**大写字母约 8 px 以上基本都能读出,4–6 px 约三分之一,4 px 以下几乎读不出**;VGA 上大部分小字只有 2–6 px。
+- **遗留 / 下一步**:用户核对 `truth.json`(饼干盒正面、万用表标了 verify)、给拼接打分。Warping Residual 官方代码没找到,`multi_h` 是简化版。字高是估计值,每个高度区间的样本数不多。
+
 
 ## 2026-10-08 · 双板最小流程:"拍一张"命令 0xB2 + 左右同时拍、旋转、拼接(PR #36,Issue #35)
 

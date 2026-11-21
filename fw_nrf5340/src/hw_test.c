@@ -1,11 +1,14 @@
 /*
- * Hardware check for the wires added on 2026-10-10 (build with -Cflags 'HW_TEST'; the
- * camera / BLE application does not start). Prints PASS / FAIL per item on RTT:
+ * Hardware check (build with -Cflags 'HW_TEST'; the camera / BLE application does not start).
+ * Prints PASS / FAIL per item on RTT:
  *   [1] HM0360 answers I2C (camera init as usual)
  *   [2] FSIN    (P1.11): FSYNC on (0x3010[1]); frames must follow our pulses
  *   [3] TRIGGER (P0.25): MODE_SELECT = Streaming 4; frames only while the pin is high
- *   [4] PSRAM   (SPIM4 8 MHz, CS P1.12, MOSI P1.13, MISO P1.14, SCK P1.15): ID, then all
- *       8 MB written and read back in 1 KB bursts (tCEM ignored, as agreed on 10-10)
+ *   [4] INT     (P1.12, 2026-10-14): driven low by the sensor; Early VSYNC interrupt in pulse
+ *       mode gives one INT pulse per frame; level mode holds INT until INT_CLEAR
+ *   [5] PSRAM on QSPI (2026-10-14, P0.13-P0.18, src/psram.c): wires, ID, single line and quad
+ *       at 8-96 MHz, CE# low time per burst measured on the pin (tCEM), throughput per burst
+ *       size, 8 MB write / read twice, unaligned accesses through the psram.c API
  * Frames are counted by polling FVLD for rising edges (it is high for the whole frame
  * period and low only ~60 us between frames) and cross-checked with FRAME_COUNT.
  */
@@ -17,19 +20,15 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
+#include <cmsis_core.h>
 #include <hal/nrf_gpio.h>
-#include <hal/nrf_spim.h>
+#include <hal/nrf_qspi.h>
 
 #include "camera.h"
 #include "i2c.h"
 #include "pins.h"
+#include "psram.h"
 
-#define CAM_FSIN     NRF_GPIO_PIN_MAP(1, 11)  // Arduino D9
-#define CAM_TRIGGER  NRF_GPIO_PIN_MAP(0, 25)  // Arduino A4
-#define PSRAM_CS     NRF_GPIO_PIN_MAP(1, 12)  // Arduino D10
-#define PSRAM_MOSI   NRF_GPIO_PIN_MAP(1, 13)  // Arduino D11
-#define PSRAM_MISO   NRF_GPIO_PIN_MAP(1, 14)  // Arduino D12
-#define PSRAM_SCK    NRF_GPIO_PIN_MAP(1, 15)  // Arduino D13
 
 #define REG_MODE_SELECT   0x0100
 #define REG_FRAME_COUNT_H 0x0005
@@ -186,105 +185,349 @@ static void testTrigger(void)
   result("[3] TRIGGER P0.25", pass, detail);
 }
 
-/* ---- PSRAM (APS6404L) over SPIM4, register level like the camera SPIS ---- */
+/* ---- [4] INT (P1.12) ---- */
 
-#define PSRAM_SIZE  (8u * 1024 * 1024)
-#define PSRAM_PAGE  1024u
-// SCK / SDI / CS with high drive (H0H1). With standard drive the HM0360 board (jumper wires)
-// got an extra clock edge on SCK at each SDO rise (ID 0b 6d, data shifted); 2026-10-11.
-// -Cflags 'HW_TEST;PSRAM_STANDARD_DRIVE' for the comparison.
-#ifdef PSRAM_STANDARD_DRIVE
-#define PSRAM_DRIVE NRF_GPIO_PIN_S0S1
-#else
-#define PSRAM_DRIVE NRF_GPIO_PIN_H0H1
-#endif
+#define REG_AE_CTRL1       0x2001  // [1] AE non-converged INT, [0] AE statistics INT
+#define REG_INT_PULSE_MODE 0x2061  // [0] 1: pulse, 0: level
+#define REG_INT_INDIC      0x2064  // [5] Early VSYNC, [3] MD, [2] AENC, [1] Stat, [0] ALC
+#define REG_INT_CLEAR      0x2065
+#define REG_EARLY_INT_EN   0x309C  // [0] Early VSYNC interrupt
 
-static void psramOutput(uint32_t pin, bool inputConnected)
+typedef struct {
+  uint32_t fvld, rises;
+  uint32_t high_min_us, high_max_us;  // INT pulse width
+  uint32_t lead_min_us, lead_max_us;  // INT rise -> next FVLD rise
+  bool high_at_end;
+} int_window_t;
+
+static int_window_t watchInt(uint32_t ms)
 {
-  nrf_gpio_cfg(pin, NRF_GPIO_PIN_DIR_OUTPUT,
-               inputConnected ? NRF_GPIO_PIN_INPUT_CONNECT : NRF_GPIO_PIN_INPUT_DISCONNECT,
-               NRF_GPIO_PIN_NOPULL, PSRAM_DRIVE, NRF_GPIO_PIN_NOSENSE);
-}
-
-static uint8_t spiTx[4 + PSRAM_PAGE];
-static uint8_t spiRx[4 + PSRAM_PAGE];
-
-static void spim(const uint8_t *tx, size_t txLen, uint8_t *rx, size_t rxLen)
-{
-  NRF_SPIM_Type *s = NRF_SPIM4;
-  nrf_gpio_pin_clear(PSRAM_CS);
-  nrf_spim_tx_buffer_set(s, tx, txLen);
-  nrf_spim_rx_buffer_set(s, rx, rxLen);
-  nrf_spim_event_clear(s, NRF_SPIM_EVENT_END);
-  nrf_spim_task_trigger(s, NRF_SPIM_TASK_START);
-  while (!nrf_spim_event_check(s, NRF_SPIM_EVENT_END)) {
+  int_window_t w = {.high_min_us = UINT32_MAX, .lead_min_us = UINT32_MAX};
+  int64_t start = k_uptime_ticks(), end = start + k_ms_to_ticks_ceil64(ms);
+  bool f = nrf_gpio_pin_read(CAM_FRAME_VALID), i = nrf_gpio_pin_read(CAM_INT);
+  int64_t rise = -1, lead = -1;
+  for (int64_t now = start; now < end; now = k_uptime_ticks()) {
+    bool fl = nrf_gpio_pin_read(CAM_FRAME_VALID), il = nrf_gpio_pin_read(CAM_INT);
+    if (il && !i) {
+      w.rises++;
+      rise = lead = now;
+    } else if (!il && i && rise >= 0) {
+      uint32_t us = ticksToUs(now - rise);
+      w.high_min_us = MIN(w.high_min_us, us);
+      w.high_max_us = MAX(w.high_max_us, us);
+      rise = -1;
+    }
+    if (fl && !f) {
+      w.fvld++;
+      if (lead >= 0) {
+        uint32_t us = ticksToUs(now - lead);
+        w.lead_min_us = MIN(w.lead_min_us, us);
+        w.lead_max_us = MAX(w.lead_max_us, us);
+        lead = -1;
+      }
+    }
+    f = fl;
+    i = il;
   }
-  nrf_gpio_pin_set(PSRAM_CS);
+  w.high_at_end = i;
+  if (w.high_min_us == UINT32_MAX) {
+    w.high_min_us = 0;
+  }
+  if (w.lead_min_us == UINT32_MAX) {
+    w.lead_min_us = 0;
+  }
+  return w;
 }
 
-static void psramInit(void)
+static void printInt(const char *name, const int_window_t *w)
 {
-  NRF_SPIM_Type *s = NRF_SPIM4;
-  nrf_gpio_pin_set(PSRAM_CS);
-  psramOutput(PSRAM_CS, false);
-  nrf_gpio_pin_clear(PSRAM_SCK);
-  psramOutput(PSRAM_SCK, true);
-  psramOutput(PSRAM_MOSI, false);
-  nrf_gpio_cfg_input(PSRAM_MISO, NRF_GPIO_PIN_PULLDOWN);  // reads 0 if nothing drives it
-  nrf_spim_pins_set(s, PSRAM_SCK, PSRAM_MOSI, PSRAM_MISO);
-  nrf_spim_frequency_set(s, NRF_SPIM_FREQ_8M);
-  nrf_spim_configure(s, NRF_SPIM_MODE_0, NRF_SPIM_BIT_ORDER_MSB_FIRST);
-  nrf_spim_orc_set(s, 0x00);
-  nrf_spim_enable(s);
-
-  static const uint8_t resetEnable = 0x66, reset = 0x99;
-  spim(&resetEnable, 1, NULL, 0);
-  spim(&reset, 1, NULL, 0);
-  k_busy_wait(100);
+  printk("[hwtest]   %-30s FVLD rises %3u, INT rises %3u, INT high %u..%u us, INT->FVLD %u..%u us%s\n", name,
+         w->fvld, w->rises, w->high_min_us, w->high_max_us, w->lead_min_us, w->lead_max_us,
+         w->high_at_end ? ", INT high at the end" : "");
 }
 
-static uint32_t xorshift(uint32_t x)
+static void intClear(void)
 {
-  x ^= x << 13;
-  x ^= x >> 17;
-  x ^= x << 5;
+  i2cWrite16NoVerify(CAMERA_I2C_ADDR, REG_INT_CLEAR, 0x3F);
+  i2cWrite16NoVerify(CAMERA_I2C_ADDR, REG_INT_CLEAR, 0x00);
+}
+
+static void intUpdate(void)
+{
+  i2cWrite16NoVerify(CAMERA_I2C_ADDR, REG_COMMAND_UPDATE, 0x01);
+  k_msleep(300);
+}
+
+static void testInt(void)
+{
+  char detail[128];
+  uint8_t ae1 = i2cRead16(CAMERA_I2C_ADDR, REG_AE_CTRL1);
+  printk("[hwtest]   defaults: AE_CTRL1 0x%02x, PULSE_MODE 0x%02x, EARLY_INT_EN 0x%02x, INT_INDIC 0x%02x\n", ae1,
+         i2cRead16(CAMERA_I2C_ADDR, REG_INT_PULSE_MODE), i2cRead16(CAMERA_I2C_ADDR, REG_EARLY_INT_EN),
+         i2cRead16(CAMERA_I2C_ADDR, REG_INT_INDIC));
+
+  // a) Interrupts off: the sensor drives INT low, so even our pull-up reads 0 (a loose wire reads 1).
+  setMode(MODE_STREAMING);
+  i2cWrite16(CAMERA_I2C_ADDR, REG_EARLY_INT_EN, 0x00);
+  i2cWrite16(CAMERA_I2C_ADDR, REG_AE_CTRL1, ae1 & ~0x03);
+  intUpdate();
+  intClear();
+  k_msleep(50);
+  nrf_gpio_cfg_input(CAM_INT, NRF_GPIO_PIN_PULLUP);
+  k_busy_wait(500);
+  int up = nrf_gpio_pin_read(CAM_INT);
+  nrf_gpio_cfg_input(CAM_INT, NRF_GPIO_PIN_PULLDOWN);
+  k_busy_wait(500);
+  int down = nrf_gpio_pin_read(CAM_INT);
+  int_window_t off = watchInt(1000);
+  printInt("interrupts off, 1 s", &off);
+  snprintk(detail, sizeof(detail), "pull-up reads %d, pull-down reads %d, %u INT rises with interrupts off", up, down,
+           off.rises);
+  result("[4a] INT P1.12 driven low by the sensor", up == 0 && down == 0 && off.rises == 0, detail);
+
+  // b) Pulse mode, Early VSYNC interrupt: one pulse per frame, a little before FVLD rises.
+  i2cWrite16(CAMERA_I2C_ADDR, REG_INT_PULSE_MODE, 0x01);
+  i2cWrite16(CAMERA_I2C_ADDR, REG_EARLY_INT_EN, 0x01);
+  intUpdate();
+  int_window_t early = watchInt(2000);
+  printInt("Early VSYNC, pulse mode, 2 s", &early);
+  bool perFrame = early.fvld >= 10 && early.rises + 1 >= early.fvld && early.rises <= early.fvld + 1;
+  const char *source = "Early VSYNC";
+  int_window_t got = early;
+  if (!perFrame) {  // fall back to the AE statistics interrupt
+    i2cWrite16(CAMERA_I2C_ADDR, REG_EARLY_INT_EN, 0x00);
+    i2cWrite16(CAMERA_I2C_ADDR, REG_AE_CTRL1, (ae1 & ~0x03) | 0x01);
+    intUpdate();
+    int_window_t stat = watchInt(2000);
+    printInt("AE statistics, pulse mode, 2 s", &stat);
+    if (stat.rises > early.rises) {
+      got = stat;
+      source = "AE statistics";
+      perFrame = stat.fvld >= 10 && stat.rises + 1 >= stat.fvld && stat.rises <= stat.fvld + 1;
+    }
+  }
+  snprintk(detail, sizeof(detail), "%s: %u INT pulses / %u frames, pulse %u..%u us", source, got.rises, got.fvld,
+           got.high_min_us, got.high_max_us);
+  result("[4b] INT pulses once per frame", perFrame, detail);
+
+  // c) Level mode: INT stays high until INT_CLEAR, then comes back with the next frame.
+  i2cWrite16(CAMERA_I2C_ADDR, REG_INT_PULSE_MODE, 0x00);
+  intUpdate();
+  int before = nrf_gpio_pin_read(CAM_INT);
+  uint8_t indic = i2cRead16(CAMERA_I2C_ADDR, REG_INT_INDIC);
+  intClear();
+  int cleared = nrf_gpio_pin_read(CAM_INT);
+  k_msleep(300);
+  int again = nrf_gpio_pin_read(CAM_INT);
+  snprintk(detail, sizeof(detail), "INT %d (INT_INDIC 0x%02x), after INT_CLEAR %d, 300 ms later %d", before, indic,
+           cleared, again);
+  result("[4c] INT level mode + INT_CLEAR", before == 1 && cleared == 0 && again == 1, detail);
+
+  // d) Everything off again.
+  i2cWrite16(CAMERA_I2C_ADDR, REG_EARLY_INT_EN, 0x00);
+  i2cWrite16(CAMERA_I2C_ADDR, REG_AE_CTRL1, ae1);
+  intUpdate();
+  intClear();
+  int_window_t end = watchInt(1000);
+  printInt("interrupts off again, 1 s", &end);
+  setMode(MODE_SLEEP);
+}
+
+/* ---- [5] PSRAM (APS6404L) on QSPI ---- */
+
+#define QSPI_CSN NRF_GPIO_PIN_MAP(0, 18)
+#define TEST_BURST 64u  // bursts for the sweeps and diagnosis
+#define TCEM_NS  8000u  // APS6404L-3SQR (3 V, DRAM Click), up to 85 C
+
+/* The wires before the QSPI takes the pins: levels with our pull-down / pull-up, then shorts. */
+static void psramWires(void)
+{
+  struct {
+    uint32_t pin;
+    const char *name;
+    bool drive;  // INT is the sensor's output: only listened to
+    int held;    // reads the same with either pull: held by something else (-1: free)
+  } p[] = {{QSPI_CSN, "CE# P0.18", true},
+           {NRF_GPIO_PIN_MAP(0, 17), "SCK P0.17", true},
+           {NRF_GPIO_PIN_MAP(0, 13), "SIO0 P0.13", true},
+           {NRF_GPIO_PIN_MAP(0, 14), "SIO1 P0.14", true},
+           {NRF_GPIO_PIN_MAP(0, 15), "SIO2 P0.15", true},
+           {NRF_GPIO_PIN_MAP(0, 16), "SIO3 P0.16", true},
+           {CAM_FSIN, "FSIN P1.11", true},
+           {CAM_INT, "INT P1.12", false}};
+  char detail[96] = "";
+  for (int i = 0; i < ARRAY_SIZE(p); i++) {
+    nrf_gpio_cfg_input(p[i].pin, NRF_GPIO_PIN_PULLDOWN);
+    k_busy_wait(200);
+    int down = nrf_gpio_pin_read(p[i].pin);
+    nrf_gpio_cfg_input(p[i].pin, NRF_GPIO_PIN_PULLUP);
+    k_busy_wait(200);
+    int up = nrf_gpio_pin_read(p[i].pin);
+    p[i].held = down == up ? down : -1;
+    printk("[hwtest]   pin %-11s pull-down reads %d, pull-up reads %d%s\n", p[i].name, down, up,
+           p[i].held < 0 ? "" : (p[i].held ? "  (held high)" : "  (held low)"));
+    if (p[i].held >= 0) {
+      snprintk(detail + strlen(detail), sizeof(detail) - strlen(detail), "%s%s held %s", detail[0] ? ", " : "",
+               p[i].name, p[i].held ? "high" : "low");
+    }
+  }
+  int shorts = 0;
+  for (int a = 0; a < ARRAY_SIZE(p); a++) {
+    if (!p[a].drive) {
+      continue;
+    }
+    for (int level = 1; level >= 0; level--) {
+      for (int b = 0; b < ARRAY_SIZE(p); b++) {
+        if (b != a) {
+          nrf_gpio_cfg_input(p[b].pin, level ? NRF_GPIO_PIN_PULLDOWN : NRF_GPIO_PIN_PULLUP);
+        }
+      }
+      nrf_gpio_pin_write(p[a].pin, level);
+      nrf_gpio_cfg_output(p[a].pin);
+      k_busy_wait(200);
+      for (int b = 0; b < ARRAY_SIZE(p); b++) {
+        if (b != a && p[b].held < 0 && nrf_gpio_pin_read(p[b].pin) == level) {
+          printk("[hwtest]   driving %s %s pulls %s %s\n", p[a].name, level ? "high" : "low", p[b].name,
+                 level ? "high" : "low");
+          shorts++;
+        }
+      }
+      nrf_gpio_cfg_input(p[a].pin, NRF_GPIO_PIN_PULLDOWN);
+    }
+  }
+  nrf_gpio_cfg_output(CAM_FSIN);
+  nrf_gpio_pin_clear(CAM_FSIN);
+  nrf_gpio_cfg_input(CAM_INT, NRF_GPIO_PIN_PULLDOWN);
+  result("[5a] PSRAM / FSIN / INT wires: no shorts", shorts == 0, detail);
+}
+
+static void cycleCounterOn(void)
+{
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+}
+
+static uint32_t cyclesToNs(uint32_t c)
+{
+  return (uint32_t)((uint64_t)c * 1000000000ull / SystemCoreClock);
+}
+
+/* After every psramConfigure: CE# input buffer on, so the CPU can watch the pin the QSPI drives. */
+static bool configure(bool quad, uint8_t mhz, uint16_t burst)
+{
+  psram_config_t c = {.quad = quad, .sck_mhz = mhz, .burst = burst};
+  bool ok = psramConfigure(&c);
+  NRF_P0->PIN_CNF[18] &= ~GPIO_PIN_CNF_INPUT_Msk;  // INPUT = Connect
+  return ok;
+}
+
+typedef struct {
+  uint32_t frames;    // CE# low periods (a write is WREN, write, RDSR)
+  uint32_t max_low_ns;
+  uint32_t total_ns;  // task start -> READY
+} burst_t;
+
+/* One QSPI transaction with CE# polled on the pin (~10 cycles a loop, ~0.15 us at 64 MHz). */
+static burst_t measureBurst(bool write, uint32_t address, void *buf, uint32_t len)
+{
+  NRF_QSPI_Type *q = NRF_QSPI;
+  const volatile uint32_t *in = &NRF_P0->IN;
+  const uint32_t mask = 1u << 18;
+  burst_t b = {0};
+  if (write) {
+    nrf_qspi_write_buffer_set(q, buf, len, address);
+  } else {
+    nrf_qspi_read_buffer_set(q, buf, len, address);
+  }
+  unsigned key = irq_lock();
+  nrf_qspi_event_clear(q, NRF_QSPI_EVENT_READY);
+  uint32_t t0 = DWT->CYCCNT, start = 0, max = 0;
+  bool low = false;
+  nrf_qspi_task_trigger(q, write ? NRF_QSPI_TASK_WRITESTART : NRF_QSPI_TASK_READSTART);
+  for (uint32_t guard = 0; guard < 2000000; guard++) {
+    uint32_t now = DWT->CYCCNT;
+    bool l = !(*in & mask);
+    if (l && !low) {
+      start = now;
+      b.frames++;
+    } else if (!l && low) {
+      max = MAX(max, now - start);
+    }
+    low = l;
+    if (!l && q->EVENTS_READY) {
+      break;
+    }
+  }
+  uint32_t total = DWT->CYCCNT - t0;
+  irq_unlock(key);
+  b.max_low_ns = cyclesToNs(max);
+  b.total_ns = cyclesToNs(total);
+  return b;
+}
+
+/* Worst CE# low over n bursts of the current burst size, read and write. */
+static void worstBursts(int n, burst_t *rd, burst_t *wr)
+{
+  static uint32_t buf[PSRAM_PAGE / 4];
+  uint32_t len = psramConfig()->burst;
+  *rd = *wr = (burst_t){0};
+  for (int i = 0; i < n; i++) {
+    uint32_t a = 0x100000 + i * len;
+    burst_t w = measureBurst(true, a, buf, len), r = measureBurst(false, a, buf, len);
+    if (w.max_low_ns > wr->max_low_ns) {
+      *wr = w;
+    }
+    if (r.max_low_ns > rd->max_low_ns) {
+      *rd = r;
+    }
+  }
+}
+
+static uint32_t hash32(uint32_t x)
+{
+  x ^= x >> 16;
+  x *= 0x7feb352du;
+  x ^= x >> 15;
+  x *= 0x846ca68bu;
+  x ^= x >> 16;
   return x;
 }
 
-static void fillPage(uint8_t *dst, uint32_t page, uint32_t seed)
+static uint32_t m_buf[PSRAM_PAGE / 4];
+
+static void pattern(uint32_t *dst, uint32_t address, uint32_t seed)
 {
-  uint32_t x = (page + 1) * 2654435761u ^ seed;
-  for (uint32_t i = 0; i < PSRAM_PAGE; i += 4) {
-    x = xorshift(x);
-    memcpy(dst + i, &x, 4);
+  for (uint32_t i = 0; i < PSRAM_PAGE / 4; i++) {
+    dst[i] = hash32((address / 4 + i) ^ seed);
   }
 }
 
-/* Write then read back the whole chip; returns bad bytes. */
-static uint32_t psramPass(uint32_t seed, uint32_t *writeMs, uint32_t *readMs, uint32_t *firstBad)
+static bool writeRegion(uint32_t base, uint32_t bytes, uint32_t seed)
 {
-  static uint8_t expect[PSRAM_PAGE];
+  for (uint32_t a = base; a < base + bytes; a += PSRAM_PAGE) {
+    pattern(m_buf, a, seed);
+    if (!psramWrite(a, m_buf, PSRAM_PAGE)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/* Bad bytes in [base, base + bytes); UINT32_MAX if a transfer timed out. */
+static uint32_t verifyRegion(uint32_t base, uint32_t bytes, uint32_t seed, uint32_t *firstBad)
+{
+  static uint32_t expect[PSRAM_PAGE / 4];
   uint32_t bad = 0;
   *firstBad = UINT32_MAX;
-
-  int64_t t0 = k_uptime_get();
-  for (uint32_t page = 0; page < PSRAM_SIZE / PSRAM_PAGE; page++) {
-    uint32_t a = page * PSRAM_PAGE;
-    spiTx[0] = 0x02;
-    spiTx[1] = a >> 16;
-    spiTx[2] = a >> 8;
-    spiTx[3] = a;
-    fillPage(spiTx + 4, page, seed);
-    spim(spiTx, sizeof(spiTx), NULL, 0);
-  }
-  int64_t t1 = k_uptime_get();
-  for (uint32_t page = 0; page < PSRAM_SIZE / PSRAM_PAGE; page++) {
-    uint32_t a = page * PSRAM_PAGE;
-    uint8_t cmd[4] = {0x03, a >> 16, a >> 8, a};
-    spim(cmd, 4, spiRx, sizeof(spiRx));
-    fillPage(expect, page, seed);
+  for (uint32_t a = base; a < base + bytes; a += PSRAM_PAGE) {
+    if (!psramRead(a, m_buf, PSRAM_PAGE)) {
+      return UINT32_MAX;
+    }
+    pattern(expect, a, seed);
+    const uint8_t *g = (const uint8_t *)m_buf, *e = (const uint8_t *)expect;
     for (uint32_t i = 0; i < PSRAM_PAGE; i++) {
-      if (spiRx[4 + i] != expect[i]) {
+      if (g[i] != e[i]) {
         if (bad == 0) {
           *firstBad = a + i;
         }
@@ -292,243 +535,456 @@ static uint32_t psramPass(uint32_t seed, uint32_t *writeMs, uint32_t *readMs, ui
       }
     }
   }
-  *writeMs = (uint32_t)(t1 - t0);
-  *readMs = (uint32_t)(k_uptime_get() - t1);
   return bad;
 }
 
-static void psramReadId(uint8_t id[8])
+static uint32_t check(uint32_t bytes, uint32_t seed)
 {
-  uint8_t cmd[4] = {0x9F, 0, 0, 0};
-  uint8_t rx[12];
-  spim(cmd, 4, rx, sizeof(rx));
-  memcpy(id, rx + 4, 8);
+  uint32_t firstBad;
+  if (!writeRegion(0, bytes, seed)) {
+    return UINT32_MAX;
+  }
+  return verifyRegion(0, bytes, seed, &firstBad);
 }
 
-/* Quick write / read check of the first n bytes; returns bad bytes. */
-static uint32_t psramQuick(uint32_t bytes)
+/* KB/s over bytes, same 1 KB RAM buffer each time (no pattern work in the timing). */
+static void throughput(uint32_t bytes, uint32_t *writeKBs, uint32_t *readKBs)
 {
-  static uint8_t expect[PSRAM_PAGE];
-  uint32_t bad = 0;
-  for (uint32_t page = 0; page < bytes / PSRAM_PAGE; page++) {
-    uint32_t a = page * PSRAM_PAGE;
-    spiTx[0] = 0x02;
-    spiTx[1] = a >> 16;
-    spiTx[2] = a >> 8;
-    spiTx[3] = a;
-    fillPage(spiTx + 4, page, 0x5EED);
-    spim(spiTx, sizeof(spiTx), NULL, 0);
+  int64_t t0 = k_uptime_ticks();
+  for (uint32_t a = 0; a < bytes; a += PSRAM_PAGE) {
+    psramWrite(a, m_buf, PSRAM_PAGE);
   }
-  for (uint32_t page = 0; page < bytes / PSRAM_PAGE; page++) {
-    uint32_t a = page * PSRAM_PAGE;
-    uint8_t cmd[4] = {0x03, a >> 16, a >> 8, a};
-    spim(cmd, 4, spiRx, sizeof(spiRx));
-    fillPage(expect, page, 0x5EED);
-    for (uint32_t i = 0; i < PSRAM_PAGE; i++) {
-      bad += spiRx[4 + i] != expect[i];
+  int64_t t1 = k_uptime_ticks();
+  for (uint32_t a = 0; a < bytes; a += PSRAM_PAGE) {
+    psramRead(a, m_buf, PSRAM_PAGE);
+  }
+  int64_t t2 = k_uptime_ticks();
+  uint32_t wUs = MAX(1u, ticksToUs(t1 - t0)), rUs = MAX(1u, ticksToUs(t2 - t1));
+  *writeKBs = (uint32_t)((uint64_t)bytes * 1000000 / 1024 / wUs);
+  *readKBs = (uint32_t)((uint64_t)bytes * 1000000 / 1024 / rUs);
+}
+
+static const uint8_t m_mhz[] = {8, 16, 24, 32, 48, 96};
+
+/* Unaligned writes / reads of 1-300 bytes through psram.c, from RAM and from flash, vs. a RAM copy. */
+static bool apiCheck(char *detail, size_t size)
+{
+  static uint8_t shadow[4096], src[304], dst[304];
+  static const uint8_t flashData[300] = {[0] = 0x5A, [1] = 0xC3, [17] = 0x81, [299] = 0x7E};
+  const uint32_t base = 0x200001;  // odd on purpose
+  uint32_t x = 0x9E3779B9u, mismatches = 0;
+  for (uint32_t i = 0; i < sizeof(shadow); i++) {
+    shadow[i] = (uint8_t)hash32(i);
+  }
+  bool ok = psramWrite(base, shadow, sizeof(shadow));
+  for (int n = 0; n < 400 && ok; n++) {
+    x = hash32(x + n);
+    uint32_t off = x % (sizeof(shadow) - 300), len = 1 + (x >> 12) % 300, skew = (x >> 24) & 3;
+    const uint8_t *from;
+    if (n % 10 == 9) {
+      from = flashData;
+    } else {
+      for (uint32_t i = 0; i < len; i++) {
+        src[skew + i] = (uint8_t)hash32(x ^ i);
+      }
+      from = src + skew;
+    }
+    ok = psramWrite(base + off, from, len);
+    memcpy(shadow + off, from, len);
+    x = hash32(x);
+    off = x % (sizeof(shadow) - 300);
+    len = 1 + (x >> 12) % 300;
+    skew = (x >> 24) & 3;
+    ok = ok && psramRead(base + off, dst + skew, len);
+    mismatches += memcmp(dst + skew, shadow + off, len) != 0;
+  }
+  static uint8_t all[4096];
+  ok = ok && psramRead(base, all, sizeof(all));
+  bool same = memcmp(all, shadow, sizeof(all)) == 0;
+  snprintk(detail, size, "400 random writes + reads (1-300 B, odd addresses, RAM and flash sources): %u bad reads, final 4 KB %s",
+           mismatches, same ? "matches" : "differs");
+  return ok && mismatches == 0 && same;
+}
+
+/* ---- quad diagnosis: known contents written on one line, read on four (and the reverse) ---- */
+
+#define FILL_ADDRESS 0x0BADADD5u  // every word holds its own address
+
+static void fillAll(uint32_t value)
+{
+  configure(false, 48, TEST_BURST);
+  for (uint32_t a = 0; a < PSRAM_SIZE; a += PSRAM_PAGE) {
+    for (uint32_t i = 0; i < PSRAM_PAGE / 4; i++) {
+      m_buf[i] = value == FILL_ADDRESS ? a + 4 * i : value;
+    }
+    psramWrite(a, m_buf, PSRAM_PAGE);
+  }
+}
+
+static void io23Pull(uint32_t pull)
+{
+  for (int pin = 15; pin <= 16; pin++) {
+    NRF_P0->PIN_CNF[pin] = (NRF_P0->PIN_CNF[pin] & ~GPIO_PIN_CNF_PULL_Msk) | (pull << GPIO_PIN_CNF_PULL_Pos);
+  }
+}
+
+static void dump(const char *label, uint32_t address)
+{
+  uint32_t w[4] = {0};
+  bool ok = psramXfer(false, address, w, sizeof(w));
+  printk("[hwtest]   %-44s @%06x: %08x %08x %08x %08x%s\n", label, address, w[0], w[1], w[2], w[3], ok ? "" : " (timeout)");
+}
+
+/*
+ * Which toggling breaks quad reads: each test byte repeated over 4 KB (written on one line), read
+ * back on four. In quad a byte is two nibbles, high first: byte 0x01 toggles SIO0 every clock,
+ * 0x0F all four lines, 0x00 / 0xFF / 0x33 / 0xCC none.
+ */
+static void quadToggles(uint8_t mhz)
+{
+  static const uint8_t bytes[] = {0x00, 0xFF, 0x33, 0xCC, 0x01, 0x02, 0x04, 0x08, 0x03, 0x0C, 0x05, 0x0A, 0x0F, 0xF0, 0x5A};
+  const uint32_t base = 0x10000, len = 4096;
+  static uint8_t got[4096];
+  char line[160] = "";
+  for (int i = 0; i < ARRAY_SIZE(bytes); i++) {
+    configure(false, 48, TEST_BURST);
+    memset(m_buf, bytes[i], PSRAM_PAGE);
+    for (uint32_t a = base; a < base + len; a += PSRAM_PAGE) {
+      psramWrite(a, m_buf, PSRAM_PAGE);
+    }
+    configure(true, mhz, TEST_BURST);
+    psramRead(base, got, len);
+    uint32_t bad = 0;
+    for (uint32_t k = 0; k < len; k++) {
+      bad += got[k] != bytes[i];
+    }
+    snprintk(line + strlen(line), sizeof(line) - strlen(line), " %02x:%u", bytes[i], bad);
+  }
+  printk("[hwtest]   quad %2u MHz, bad bytes / 4 KB per repeated byte:%s\n", mhz, line);
+}
+
+/* Random bytes: expected vs. quad-read, and whether the error looks like one extra / missing SCK edge. */
+static void quadShift(uint8_t mhz)
+{
+  static uint8_t exp[64] __aligned(4), got[64] __aligned(4);
+  for (int i = 0; i < 64; i++) {
+    exp[i] = (uint8_t)hash32(i * 77 + mhz);
+  }
+  configure(false, 48, TEST_BURST);
+  psramWrite(0x20000, exp, sizeof(exp));
+  configure(true, mhz, TEST_BURST);
+  psramXfer(false, 0x20000, got, sizeof(got));
+  printk("[hwtest]   quad %u MHz random  exp:", mhz);
+  for (int i = 0; i < 24; i++) {
+    printk(" %02x", exp[i]);
+  }
+  printk("\n[hwtest]   quad %u MHz random  got:", mhz);
+  for (int i = 0; i < 24; i++) {
+    printk(" %02x", got[i]);
+  }
+  printk("\n");
+  // Nibble streams: got shifted by s nibbles (s < 0: got is late) vs. exp, longest match from the start.
+  int first = -1;
+  for (int i = 0; i < 128 && first < 0; i++) {
+    uint8_t ne = (exp[i / 2] >> (i % 2 ? 0 : 4)) & 0xF, ng = (got[i / 2] >> (i % 2 ? 0 : 4)) & 0xF;
+    if (ne != ng) {
+      first = i;
     }
   }
-  return bad;
+  for (int s = -2; s <= 2; s++) {
+    int match = 0;
+    for (int i = MAX(first, 0); i < 128; i++) {
+      int j = i + s;
+      if (j < 0 || j >= 128) {
+        continue;
+      }
+      uint8_t ne = (exp[j / 2] >> (j % 2 ? 0 : 4)) & 0xF, ng = (got[i / 2] >> (i % 2 ? 0 : 4)) & 0xF;
+      match += ne == ng;
+    }
+    printk("[hwtest]   quad %u MHz: from the first wrong nibble (%d), got[i] == exp[i%+d] for %d of %d nibbles\n", mhz,
+           first, s, match, 128 - MAX(first, 0));
+  }
 }
 
-static void printBytes(const char *label, const uint8_t *p, int n)
+/* Random 16 KB written on one line, read on four: bad bytes by position inside the 64 B burst. */
+static void quadPositions(uint8_t mhz)
 {
-  printk("[hwtest]   %-26s", label);
-  for (int i = 0; i < n; i++) {
-    printk(" %02x", p[i]);
+  uint32_t hist[16] = {0}, fb;
+  configure(false, 48, TEST_BURST);
+  writeRegion(0x30000, 16 * 1024, 0x777);
+  configure(true, mhz, TEST_BURST);
+  static uint32_t expect[PSRAM_PAGE / 4];
+  for (uint32_t a = 0x30000; a < 0x30000 + 16 * 1024; a += PSRAM_PAGE) {
+    psramRead(a, m_buf, PSRAM_PAGE);
+    pattern(expect, a, 0x777);
+    const uint8_t *g = (const uint8_t *)m_buf, *e = (const uint8_t *)expect;
+    for (uint32_t i = 0; i < PSRAM_PAGE; i++) {
+      hist[(i % 64) / 4] += g[i] != e[i];
+    }
+  }
+  (void)fb;
+  printk("[hwtest]   quad %2u MHz, bad bytes by burst offset (4 B bins, 256 each):", mhz);
+  for (int i = 0; i < 16; i++) {
+    printk(" %u", hist[i]);
   }
   printk("\n");
 }
 
-/* Pin levels with the internal pull-down, then pull-up (nothing driving from our side). */
-static void psramPins(void)
+/*
+ * 0xFF read on four lines comes back as f1 11 11 ..: does the chip stop driving after the first
+ * nibble (all four outputs going high at once)? All four lines pulled the same way: a chip that
+ * still drives gives ff either way, a silent one gives the pull. Then: is the ID still there?
+ */
+static void quadAllHigh(uint8_t mhz)
 {
   static const struct {
-    uint32_t pin;
+    uint32_t pull;
     const char *name;
-  } pins[] = {{PSRAM_CS, "CS P1.12"}, {PSRAM_MOSI, "SDI P1.13"}, {PSRAM_MISO, "SDO P1.14"}, {PSRAM_SCK, "SCK P1.15"}};
-  for (int i = 0; i < ARRAY_SIZE(pins); i++) {
-    nrf_gpio_cfg_input(pins[i].pin, NRF_GPIO_PIN_PULLDOWN);
-    k_busy_wait(100);
-    int down = nrf_gpio_pin_read(pins[i].pin);
-    nrf_gpio_cfg_input(pins[i].pin, NRF_GPIO_PIN_PULLUP);
-    k_busy_wait(100);
-    int up = nrf_gpio_pin_read(pins[i].pin);
-    printk("[hwtest]   pin %-10s pull-down reads %d, pull-up reads %d\n", pins[i].name, down, up);
-  }
-}
-
-static void psramRaw(void)
-{
-  uint8_t rx[4 + 16];
-  uint8_t cmd[4] = {0x03, 0, 0, 0};
-  spim(cmd, 4, rx, sizeof(rx));
-  printBytes("read @0 before write:", rx + 4, 16);
-
-  uint8_t wr[4 + 16] = {0x02, 0, 0, 0};
-  for (int i = 0; i < 16; i++) {
-    wr[4 + i] = i;
-  }
-  spim(wr, sizeof(wr), NULL, 0);
-  spim(cmd, 4, rx, sizeof(rx));
-  printBytes("read @0 after 00..0f:", rx + 4, 16);
-  spim(cmd, 4, rx, sizeof(rx));
-  printBytes("read @0 again:", rx + 4, 16);
-
-  uint8_t fast[5] = {0x0B, 0, 0, 0, 0};  // fast read, 8 wait cycles
-  uint8_t frx[5 + 16];
-  spim(fast, 5, frx, sizeof(frx));
-  printBytes("fast read @0:", frx + 5, 16);
-
-  uint8_t idcmd[4] = {0x9F, 0, 0, 0};
-  uint8_t idrx[20];
-  spim(idcmd, 4, idrx, sizeof(idrx));
-  printBytes("read ID, all bytes:", idrx, 20);
-
-  // Same byte everywhere: few transitions (00 / ff) vs. many (aa / 55), plus single bits.
-  static const uint8_t fills[] = {0x00, 0xFF, 0xAA, 0x55, 0x80, 0x01, 0xF0, 0x0F};
-  for (int f = 0; f < ARRAY_SIZE(fills); f++) {
-    memset(wr + 4, fills[f], 16);
-    spim(wr, sizeof(wr), NULL, 0);
-    spim(cmd, 4, rx, sizeof(rx));
-    char label[32];
-    snprintk(label, sizeof(label), "wrote 16 x %02x, read:", fills[f]);
-    printBytes(label, rx + 4, 16);
-  }
-}
-
-/* Bit-banged SPI mode 0, ~100 kHz: same transactions without the SPIM peripheral. */
-static void bbXfer(const uint8_t *tx, size_t txLen, uint8_t *rx, size_t rxLen)
-{
-  size_t n = MAX(txLen, rxLen);
-  nrf_gpio_pin_clear(PSRAM_CS);
-  k_busy_wait(5);
-  for (size_t i = 0; i < n; i++) {
-    uint8_t out = i < txLen ? tx[i] : 0x00, in = 0;
-    for (int b = 7; b >= 0; b--) {
-      nrf_gpio_pin_write(PSRAM_MOSI, (out >> b) & 1);
-      k_busy_wait(5);
-      nrf_gpio_pin_set(PSRAM_SCK);  // chip samples SI, we sample SO on the rising edge
-      in = (in << 1) | nrf_gpio_pin_read(PSRAM_MISO);
-      k_busy_wait(5);
-      nrf_gpio_pin_clear(PSRAM_SCK);
-    }
-    if (i < rxLen) {
-      rx[i] = in;
+  } pulls[] = {{GPIO_PIN_CNF_PULL_Pulldown, "pull-down"}, {GPIO_PIN_CNF_PULL_Pullup, "pull-up"}};
+  for (int p = 0; p < 2; p++) {
+    for (int fill = 0; fill < 2; fill++) {
+      uint8_t v = fill ? 0xFF : 0x77;  // 0x77: three lines high, never all four
+      configure(false, 48, TEST_BURST);
+      memset(m_buf, v, 64);
+      psramXfer(true, 0x40000, m_buf, 64);
+      configure(true, mhz, TEST_BURST);
+      for (int pin = 13; pin <= 16; pin++) {
+        NRF_P0->PIN_CNF[pin] = (NRF_P0->PIN_CNF[pin] & ~GPIO_PIN_CNF_PULL_Msk) | (pulls[p].pull << GPIO_PIN_CNF_PULL_Pos);
+      }
+      uint8_t r1[16] __aligned(4), r2[16] __aligned(4), id[8];
+      psramXfer(false, 0x40000, r1, 16);
+      psramXfer(false, 0x40000, r2, 16);
+      psramReadId(id);  // no reset in between
+      printk("[hwtest]   all %02x, quad %u MHz, IO0-IO3 %-9s read: %02x %02x %02x %02x %02x %02x %02x %02x | again %02x %02x %02x %02x | ID %02x %02x\n",
+             v, mhz, pulls[p].name, r1[0], r1[1], r1[2], r1[3], r1[4], r1[5], r1[6], r1[7], r2[0], r2[1], r2[2], r2[3],
+             id[0], id[1]);
     }
   }
-  k_busy_wait(5);
-  nrf_gpio_pin_set(PSRAM_CS);
-  k_busy_wait(5);
 }
 
-static void psramBitBang(void)
+static void quadDiag(void)
 {
-  nrf_gpio_pin_set(PSRAM_CS);
-  psramOutput(PSRAM_CS, false);
-  nrf_gpio_pin_clear(PSRAM_SCK);
-  psramOutput(PSRAM_SCK, false);
-  nrf_gpio_pin_clear(PSRAM_MOSI);
-  psramOutput(PSRAM_MOSI, false);
-  nrf_gpio_cfg_input(PSRAM_MISO, NRF_GPIO_PIN_PULLDOWN);
-
-  static const uint8_t re = 0x66, rst = 0x99;
-  bbXfer(&re, 1, NULL, 0);
-  bbXfer(&rst, 1, NULL, 0);
-  k_busy_wait(100);
-
-  uint8_t idcmd[4] = {0x9F, 0, 0, 0}, idrx[12];
-  bbXfer(idcmd, 4, idrx, sizeof(idrx));
-  printBytes("bit-bang read ID:", idrx, 12);
-
-  uint8_t wr[4 + 16] = {0x02, 0, 0, 0};
-  for (int i = 0; i < 16; i++) {
-    wr[4 + i] = 0x10 + i;
+  quadAllHigh(8);
+  quadAllHigh(32);
+  quadToggles(8);
+  quadToggles(32);
+  quadPositions(8);
+  quadPositions(32);
+  quadShift(8);
+  quadShift(32);
+  printk("[hwtest]   --- quad diagnosis (single line 48 MHz writes / reads, quad 8 MHz) ---\n");
+  static const struct {
+    uint32_t fill, pull;
+    const char *label;
+  } cases[] = {{0xFFFFFFFFu, GPIO_PIN_CNF_PULL_Pulldown, "all ff, IO2/IO3 pull-down, quad read"},
+               {0x00000000u, GPIO_PIN_CNF_PULL_Pullup, "all 00, IO2/IO3 pull-up, quad read"},
+               {0x33333333u, GPIO_PIN_CNF_PULL_Pullup, "all 33 (IO0/IO1 bits), pull-up, quad read"},
+               {0xCCCCCCCCu, GPIO_PIN_CNF_PULL_Pulldown, "all cc (IO2/IO3 bits), pull-down, quad read"}};
+  for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+    fillAll(cases[i].fill);
+    configure(true, 8, TEST_BURST);
+    io23Pull(cases[i].pull);
+    dump(cases[i].label, 0x000000);
+    dump(cases[i].label, 0x123450);
+    io23Pull(GPIO_PIN_CNF_PULL_Disabled);
   }
-  bbXfer(wr, sizeof(wr), NULL, 0);
-  uint8_t cmd[4] = {0x03, 0, 0, 0}, rx[4 + 16];
-  bbXfer(cmd, 4, rx, sizeof(rx));
-  printBytes("bit-bang read @0 (10..1f):", rx + 4, 16);
+  fillAll(FILL_ADDRESS);
+  configure(true, 8, TEST_BURST);
+  dump("word = own address, quad read", 0x000100);
+  dump("word = own address, quad read", 0x5A5A00);
+  configure(false, 8, TEST_BURST);
+  dump("word = own address, single read", 0x5A5A00);
+
+  // Quad write of a marker into an all-zero chip; single-line read back, then where did it land?
+  fillAll(0);
+  configure(true, 8, TEST_BURST);
+  static uint32_t marker[4] = {0x76543210u, 0xFEDCBA98u, 0x11223344u, 0xA5C35A3Cu};
+  psramXfer(true, 0x000100, marker, sizeof(marker));
+  configure(false, 48, TEST_BURST);
+  dump("marker quad-written, single read", 0x000100);
+  int hits = 0;
+  for (uint32_t a = 0; a < PSRAM_SIZE && hits < 8; a += PSRAM_PAGE) {
+    psramRead(a, m_buf, PSRAM_PAGE);
+    for (uint32_t i = 0; i < PSRAM_PAGE / 4 && hits < 8; i++) {
+      if (m_buf[i] != 0) {
+        printk("[hwtest]   non-zero word after the quad write: @%06x = %08x\n", a + 4 * i, m_buf[i]);
+        hits++;
+      }
+    }
+  }
+  if (hits == 0) {
+    printk("[hwtest]   no non-zero word anywhere: the quad write did not reach the chip\n");
+  }
 }
 
 /*
- * Shorts between the PSRAM wires (and FSIN next to them): drive one pin high / low, the others
- * are inputs pulled the other way. CS stays high from the Click's pull-up (chip SO is high-Z).
+ * Quad with softer nRF edges (2026-10-14): drive of SCK / CE# and of SIO0-3 per case, 64 KB
+ * single write -> quad read and quad write -> single read. The APS6404L's own output drive is
+ * fixed (50 ohm), so reads can only change through our side's pull / input settings.
  */
-static void psramShorts(void)
+static void setDrive(uint32_t pin, nrf_gpio_pin_drive_t drive)
+{
+  NRF_P0->PIN_CNF[pin] = (NRF_P0->PIN_CNF[pin] & ~GPIO_PIN_CNF_DRIVE_Msk) | ((uint32_t)drive << GPIO_PIN_CNF_DRIVE_Pos);
+}
+
+static void quadDrive(uint8_t mhz, nrf_gpio_pin_drive_t clk, nrf_gpio_pin_drive_t data, const char *name)
+{
+  uint32_t fb;
+  configure(false, 48, TEST_BURST);
+  writeRegion(0, 64 * 1024, 0xD00D + mhz);
+  configure(true, mhz, TEST_BURST);
+  setDrive(17, clk);
+  setDrive(18, clk);
+  for (int pin = 13; pin <= 16; pin++) {
+    setDrive(pin, data);
+  }
+  uint32_t rBad = verifyRegion(0, 64 * 1024, 0xD00D + mhz, &fb);
+  bool wOk = writeRegion(0, 64 * 1024, 0xF00D + mhz);
+  configure(false, 48, TEST_BURST);
+  uint32_t wBad = wOk ? verifyRegion(0, 64 * 1024, 0xF00D + mhz, &fb) : UINT32_MAX;
+  printk("[hwtest]   quad %2u MHz, %-26s quad read %5u bad, quad write %5u bad (of 65536)\n", mhz, name, rBad, wBad);
+}
+
+static void quadDriveSweep(void)
 {
   static const struct {
-    uint32_t pin;
+    nrf_gpio_pin_drive_t clk, data;
     const char *name;
-  } pins[] = {{CAM_FSIN, "FSIN P1.11"}, {PSRAM_CS, "CS P1.12"}, {PSRAM_MOSI, "SDI P1.13"},
-              {PSRAM_MISO, "SDO P1.14"}, {PSRAM_SCK, "SCK P1.15"}};
-  int shorts = 0;
-  for (int a = 0; a < ARRAY_SIZE(pins); a++) {
-    for (int level = 1; level >= 0; level--) {
-      for (int b = 0; b < ARRAY_SIZE(pins); b++) {
-        if (b != a) {
-          nrf_gpio_cfg_input(pins[b].pin, level ? NRF_GPIO_PIN_PULLDOWN : NRF_GPIO_PIN_PULLUP);
-        }
-      }
-      nrf_gpio_pin_write(pins[a].pin, level);
-      nrf_gpio_cfg_output(pins[a].pin);
-      k_busy_wait(200);
-      for (int b = 0; b < ARRAY_SIZE(pins); b++) {
-        if (b != a && nrf_gpio_pin_read(pins[b].pin) == level && !(pins[b].pin == PSRAM_CS && level)) {
-          printk("[hwtest]   driving %s %s pulls %s %s\n", pins[a].name, level ? "high" : "low",
-                 pins[b].name, level ? "high" : "low");
-          shorts++;
-        }
-      }
-      nrf_gpio_cfg_input(pins[a].pin, NRF_GPIO_PIN_PULLDOWN);
+  } cases[] = {{NRF_GPIO_PIN_H0H1, NRF_GPIO_PIN_H0H1, "SCK/CE# H0H1, SIO H0H1"},
+               {NRF_GPIO_PIN_H0H1, NRF_GPIO_PIN_S0S1, "SCK/CE# H0H1, SIO S0S1"},
+               {NRF_GPIO_PIN_S0S1, NRF_GPIO_PIN_S0S1, "SCK/CE# S0S1, SIO S0S1"},
+               {NRF_GPIO_PIN_S0S1, NRF_GPIO_PIN_H0H1, "SCK/CE# S0S1, SIO H0H1"}};
+  static const uint8_t mhz[] = {8, 32};
+  for (int f = 0; f < ARRAY_SIZE(mhz); f++) {
+    for (int i = 0; i < ARRAY_SIZE(cases); i++) {
+      quadDrive(mhz[f], cases[i].clk, cases[i].data, cases[i].name);
     }
   }
-  nrf_gpio_cfg_output(CAM_FSIN);
-  nrf_gpio_pin_clear(CAM_FSIN);
-  result("[4-] PSRAM wires: no shorts", shorts == 0, "");
+  configure(PSRAM_DEFAULT_QUAD, PSRAM_DEFAULT_MHZ, PSRAM_DEFAULT_BURST);
 }
 
 static void testPsram(void)
 {
-  char detail[128];
-  psramShorts();
-  psramPins();
-  psramBitBang();
-  psramInit();
-  psramRaw();
+#ifdef HW_TEST_QUAD_DRIVE  // -Cflags 'HW_TEST;HW_TEST_PSRAM_ONLY;HW_TEST_QUAD_DRIVE'
+  configure(false, 8, TEST_BURST);
+  quadDriveSweep();
+  return;
+#endif
+  char detail[160];
+  cycleCounterOn();
+  psramWires();
 
-  static const struct {
-    nrf_spim_frequency_t f;
-    const char *name;
-  } freqs[] = {{NRF_SPIM_FREQ_1M, "1 MHz"}, {NRF_SPIM_FREQ_2M, "2 MHz"},
-               {NRF_SPIM_FREQ_4M, "4 MHz"}, {NRF_SPIM_FREQ_8M, "8 MHz"}};
-  for (int i = 0; i < ARRAY_SIZE(freqs); i++) {
-    nrf_spim_frequency_set(NRF_SPIM4, freqs[i].f);
-    uint8_t id[8];
-    psramReadId(id);
-    uint32_t bad = psramQuick(64 * 1024);
-    printk("[hwtest]   PSRAM %s: ID %02x %02x | EID %02x %02x %02x %02x %02x %02x | 64 KB check %u bad bytes\n",
-           freqs[i].name, id[0], id[1], id[2], id[3], id[4], id[5], id[6], id[7], bad);
-  }
-  nrf_spim_frequency_set(NRF_SPIM4, NRF_SPIM_FREQ_8M);
-
+  // [5b] ID over the QSPI custom instruction, slowest clock first.
+  bool idOk = configure(false, 8, TEST_BURST);
   uint8_t id[8];
   psramReadId(id);
-  bool idOk = id[0] == 0x0D && id[1] == 0x5D;
   snprintk(detail, sizeof(detail), "MF 0x%02x KGD 0x%02x (expect 0x0d 0x5d)", id[0], id[1]);
-  result("[4a] PSRAM ID (8 MHz)", idOk, detail);
+  result("[5b] PSRAM ID on QSPI (8 MHz)", idOk, detail);
+  if (!idOk) {
+    return;
+  }
 
+  // [5c] / [5d] Single line (0x0B / 0x02) and quad (0xEB / 0x38) at each clock: 64 KB check,
+  // CE# low per 64 B burst on the pin, throughput over 256 KB.
+  bool ok[2][ARRAY_SIZE(m_mhz)];
+  for (int quad = 0; quad < 2; quad++) {
+    for (int i = 0; i < ARRAY_SIZE(m_mhz); i++) {
+      bool idGood = configure(quad, m_mhz[i], TEST_BURST);
+      uint32_t bad = check(64 * 1024, 0x1000 * m_mhz[i] + quad);
+      burst_t rd, wr;
+      worstBursts(64, &rd, &wr);
+      uint32_t wKBs, rKBs;
+      throughput(256 * 1024, &wKBs, &rKBs);
+      ok[quad][i] = idGood && bad == 0;
+      printk("[hwtest]   %-6s %2u MHz: ID %s, 64 KB %u bad, CE# low per 64 B read %u ns / write %u ns (%u CE# periods), "
+             "write %u KB/s, read %u KB/s\n",
+             quad ? "quad" : "single", m_mhz[i], idGood ? "ok" : "BAD", bad, rd.max_low_ns, wr.max_low_ns, wr.frames,
+             wKBs, rKBs);
+    }
+  }
+  for (int quad = 0; quad < 2; quad++) {
+    char *d = detail;
+    d[0] = 0;
+    bool any = false, at32 = false;
+    for (int i = 0; i < ARRAY_SIZE(m_mhz); i++) {
+      snprintk(d + strlen(d), sizeof(detail) - strlen(d), "%s%u MHz %s", i ? ", " : "", m_mhz[i], ok[quad][i] ? "ok" : "BAD");
+      any |= ok[quad][i];
+      at32 |= m_mhz[i] == 32 && ok[quad][i];
+    }
+    result(quad ? "[5d] PSRAM quad 0xEB / 0x38 (32 MHz needed)" : "[5c] PSRAM single line 0x0B / 0x02",
+           quad ? at32 : any, detail);
+  }
+
+  quadDiag();
+
+  // [5e] Cross check at 32 MHz: written on one line, read on four, and the other way round.
+  configure(false, 32, TEST_BURST);
+  writeRegion(0, 64 * 1024, 0xC0FFEE);
+  configure(true, 32, TEST_BURST);
+  uint32_t fb, bad1 = verifyRegion(0, 64 * 1024, 0xC0FFEE, &fb);
+  writeRegion(0, 64 * 1024, 0xBEEF);
+  configure(false, 32, TEST_BURST);
+  uint32_t bad2 = verifyRegion(0, 64 * 1024, 0xBEEF, &fb);
+  snprintk(detail, sizeof(detail), "single write -> quad read %u bad, quad write -> single read %u bad (64 KB)", bad1, bad2);
+  result("[5e] PSRAM single / quad cross check", bad1 == 0 && bad2 == 0, detail);
+
+  // Burst size: CE# low on the pin vs. throughput (quad, 32 MHz and 48 MHz).
+  static const uint16_t bursts[] = {16, 32, 64, 128, 256, 512, 1024};
+  for (int f = 0; f < 2; f++) {
+    uint8_t mhz = f ? 48 : 32;
+    if (!ok[1][f ? 4 : 3]) {
+      continue;
+    }
+    for (int i = 0; i < ARRAY_SIZE(bursts); i++) {
+      configure(true, mhz, bursts[i]);
+      uint32_t bad = check(64 * 1024, 0xB000 + bursts[i]);
+      burst_t rd, wr;
+      worstBursts(200, &rd, &wr);
+      uint32_t wKBs, rKBs;
+      throughput(1024 * 1024, &wKBs, &rKBs);
+      printk("[hwtest]   quad %u MHz burst %4u B: CE# low read %5u ns, write %5u ns (task %u / %u ns), %s tCEM 8 us, "
+             "write %5u KB/s, read %5u KB/s, 64 KB %u bad\n",
+             mhz, bursts[i], rd.max_low_ns, wr.max_low_ns, rd.total_ns, wr.total_ns,
+             MAX(rd.max_low_ns, wr.max_low_ns) <= TCEM_NS ? "within" : "OVER  ", wKBs, rKBs, bad);
+    }
+  }
+
+  // [5f] - [5j] The default (psramInit, src/psram.h).
+  configure(PSRAM_DEFAULT_QUAD, PSRAM_DEFAULT_MHZ, PSRAM_DEFAULT_BURST);
+  burst_t rd, wr;
+  worstBursts(1000, &rd, &wr);
+  uint32_t worst = MAX(rd.max_low_ns, wr.max_low_ns);
+  snprintk(detail, sizeof(detail), "%s %u MHz, %u B bursts: worst CE# low read %u ns, write %u ns over 1000 bursts (limit %u ns)",
+           PSRAM_DEFAULT_QUAD ? "quad" : "single", PSRAM_DEFAULT_MHZ, PSRAM_DEFAULT_BURST, rd.max_low_ns, wr.max_low_ns, TCEM_NS);
+  result("[5f] PSRAM default keeps tCEM", worst > 0 && worst <= TCEM_NS, detail);
+
+  uint32_t wKBs, rKBs;
+  throughput(1024 * 1024, &wKBs, &rKBs);
+  snprintk(detail, sizeof(detail), "write %u KB/s, read %u KB/s (need >= 300, goal >= 2048: a raw VGA frame in 150 ms)",
+           wKBs, rKBs);
+  result("[5g] PSRAM default throughput >= 2 MB/s", wKBs >= 2048 && rKBs >= 2048, detail);
+
+  // [5h] / [5i] Whole chip, twice.
   static const uint32_t seeds[] = {0x12345678u, 0xA5A5A5A5u};
   for (int i = 0; i < 2; i++) {
-    uint32_t wMs, rMs, firstBad;
-    uint32_t bad = psramPass(seeds[i], &wMs, &rMs, &firstBad);
-    snprintk(detail, sizeof(detail), "8 MB at 8 MHz, %u bad bytes, write %u ms (%u KB/s), read %u ms (%u KB/s)",
-             bad, wMs, 8192u * 1000 / wMs, rMs, 8192u * 1000 / rMs);
-    if (bad) {
+    int64_t t0 = k_uptime_get();
+    bool wOk = writeRegion(0, PSRAM_SIZE, seeds[i]);
+    int64_t t1 = k_uptime_get();
+    uint32_t firstBad, bad = wOk ? verifyRegion(0, PSRAM_SIZE, seeds[i], &firstBad) : UINT32_MAX;
+    int64_t t2 = k_uptime_get();
+    snprintk(detail, sizeof(detail), "8 MB, default config, %u bad bytes, write %u ms, read + compare %u ms", bad,
+             (uint32_t)(t1 - t0), (uint32_t)(t2 - t1));
+    if (bad && bad != UINT32_MAX) {
       snprintk(detail + strlen(detail), sizeof(detail) - strlen(detail), ", first bad 0x%06x", firstBad);
     }
-    result(i == 0 ? "[4b] PSRAM 8 MB pass 1" : "[4c] PSRAM 8 MB pass 2", bad == 0, detail);
+    result(i == 0 ? "[5h] PSRAM 8 MB pass 1" : "[5i] PSRAM 8 MB pass 2", bad == 0, detail);
   }
+
+  // [5j] The API the encoders use (src/image.c), with odd sizes and addresses.
+  bool apiOk = apiCheck(detail, sizeof(detail));
+  result("[5j] PSRAM psramWrite / psramRead unaligned", apiOk, detail);
+
+  printk("[hwtest]   (theory, quad: read CE# low = (8 + 6 + 6 + 2 x bytes) / SCK, write (8 + 6 + 2 x bytes) / SCK)\n");
 }
 
 void hwTestRun(void)
@@ -542,11 +998,15 @@ void hwTestRun(void)
   snprintk(detail, sizeof(detail), "model 0x%04x", id);
   result("[1] HM0360 I2C", id == 0x0360, detail);
 
+#ifdef HW_TEST_PSRAM_ONLY  // -Cflags 'HW_TEST;HW_TEST_PSRAM_ONLY': skip [2]-[4]
+  id = 0;
+#endif
   if (id == 0x0360) {
     cameraSensorStream();  // MCLK on; the tests set MODE_SELECT themselves
     setMode(MODE_SLEEP);
     testFsin();
     testTrigger();
+    testInt();
   }
   testPsram();
 
