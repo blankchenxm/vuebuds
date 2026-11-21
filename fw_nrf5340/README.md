@@ -38,9 +38,9 @@ streaming to `host/viewer.py`, or Monitor (frames cached in RAM, HM0360 S2 sleep
   comes while the previous picture is still being taken or sent is skipped at the timer, not
   queued: pictures stay on the period grid, and the next one has header flag `0x04`. Timed
   pictures carry flag `0x10` (a 0xB2 in between does not). Same group as 0xB2 (not with 0xB1).
-  `host/timed_capture.py` measures the reached period. Without PSRAM the encoder output lives in
-  the RAM left after the frame slot: ~45 KB with VGA, so VGA JPEG q85 does not fit and goes out
-  raw (q60 fits).
+  `host/timed_capture.py` measures the reached period. Without PSRAM (or when its boot check
+  fails) the encoder output lives in the RAM left after the frame slot: ~45 KB with VGA, so VGA
+  JPEG q85 does not fit and goes out raw (q60 fits).
 
 ## Encoders and PSRAM (2026-10-11)
 
@@ -48,8 +48,14 @@ streaming to `host/viewer.py`, or Monitor (frames cached in RAM, HM0360 S2 sleep
   `src/codec_png.c`), JPEGENC patched for numeric quality (`lib/README.md`); state (~50 KB)
   in the frame pool after slot 0, built with `-O2`. PC check against OpenCV:
   `tools/codec_test/` (same sources, MinGW gcc).
-- `src/psram.c`: APS6404L on SPIM4 8 MHz (P1.12–P1.15, high drive), ~910 KB/s write,
-  ~780 KB/s read. `-Cflags HW_TEST` checks the whole chip.
+- `src/psram.c`: APS6404L on the QSPI pins (CE# P0.18, SCK P0.17, SIO0–3 P0.13–P0.16; since
+  2026-10-14, was SPIM4 on P1.12–P1.15), single line 48 MHz in 32 B bursts (CE# low ~6.6 µs <
+  tCEM 8 µs), ~2.7 MB/s. Quad works in principle but breaks on the DK jumper wires. The DK's
+  MX25R64 flash is cut off these pins (SB10–SB15 open, SB20–SB25 shorted).
+  **Boot check** (2026-11-20): 4 × 1 KB written across the chip, read back at once and 2 s
+  later; failed → not used, output in on-chip RAM, RTT `[psram] boot check: …`. BLE starts
+  without waiting; a picture compressed within 2 s of boot waits for the result.
+  `-Cflags HW_TEST` checks the whole chip ([5a]–[5j]).
 - Measured (VGA 640×480, two boards through the bridge, 64 MHz CPU): JPEG q85 11 KB / 49 dB,
   encode 0.32 s + BLE 0.28 s (raw: 300 KB, 5.1 s); PNG 96 KB, encode 4.2–4.9 s. QVGA JPEG q85
   5.7 KB, encode 65 ms. The application core runs at 64 MHz by default; `-Cflags CPU_128MHZ`
