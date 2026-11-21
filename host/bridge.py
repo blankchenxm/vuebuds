@@ -9,11 +9,13 @@ Frames (little endian):
       'X'  [slot mask]         disconnect (the boards reboot; the bridge reconnects)
       'T'  [slot mask][delay ms u16][command]  timed command: T = newest anchor point + delay on
                                the bridge's clock, the same T for all boards (0xB7 = picture at T)
+      'Q'  [token u32]         bridge time (PC <-> bridge clock sync)
   bridge -> PC  [A5 5A][type][slot][len u16][payload]
       'N'  one data notification ([seq, flags, ...], protocol.FrameAssembler)
       'E'  link event (central_event_t in fw_bridge/src/central.h)
       'S'  log text
       'W'  int8 result of a control write
+      'Q'  [token u32][bridge time u64 us][ok u8]  answer to 'Q' (ok 0: no link yet, no clock)
 
 Command line, e.g. stream both boards for 20 s and print per-board rates:
     python bridge.py --boards hm0360-5340 hm0360b-5340 --stream --duration 20
@@ -87,6 +89,7 @@ class Bridge:
         self.on_notify, self.on_text, self.on_event = on_notify, on_text, on_event
         self.links = [Link(), Link()]
         self.write_results: list[tuple[float, int, int]] = []  # (time, slot, err)
+        self._time_wait: dict = {}  # token -> Event, then (bridge_us, ok)
         self._ser = serial.Serial(self.port, timeout=0.1)
         self._ser.dtr = True
         self._stop = threading.Event()
@@ -126,6 +129,34 @@ class Bridge:
     def timed_write(self, mask: int, command: int, delay_ms: int = 80):
         """Time sync (plan E): the boards act at one bridge time T, delay_ms after the newest anchor."""
         self._send("T", struct.pack("<BHB", mask, delay_ms, command))
+
+    def time_query(self, token: int):
+        self._send("Q", struct.pack("<I", token))
+
+    def bridge_clock(self, samples: int = 16, timeout: float = 0.5):
+        """PC <-> bridge clock over USB: ask the bridge's time `samples` times, keep the shortest
+        round trip. Returns (offset_us, rtt_us, n): bridge_us ~= time.monotonic() * 1e6 + offset_us,
+        or None if the bridge has no clock yet (no board connected)."""
+        best = None
+        n = 0
+        for _ in range(samples):
+            self._time_token = (getattr(self, "_time_token", 0) + 1) & 0xFFFFFFFF
+            tok = self._time_token
+            ev = threading.Event()
+            self._time_wait[tok] = ev
+            t1 = time.monotonic()
+            self.time_query(tok)
+            got = ev.wait(timeout)
+            t2 = time.monotonic()
+            reply = self._time_wait.pop(tok, None)
+            if not got or not isinstance(reply, tuple) or not reply[1]:
+                continue
+            n += 1
+            rtt = (t2 - t1) * 1e6
+            offset = reply[0] - (t1 + t2) / 2 * 1e6
+            if best is None or rtt < best[1]:
+                best = (offset, rtt)
+        return (best[0], best[1], n) if best else None
 
     def disconnect(self, mask: int):
         self._send("X", bytes([mask]))
@@ -171,6 +202,12 @@ class Bridge:
             self.on_notify(slot, payload)
         elif ftype == "S":
             self.on_text(slot, payload.decode(errors="replace"))
+        elif ftype == "Q" and len(payload) >= 13:
+            tok, us, ok = struct.unpack_from("<IQB", payload)
+            ev = self._time_wait.get(tok)
+            if isinstance(ev, threading.Event):
+                self._time_wait[tok] = (us, ok)
+                ev.set()
         elif ftype == "W":
             self.write_results.append((time.monotonic(), slot, struct.unpack("<b", payload)[0]))
         elif ftype == "E" and len(payload) >= EVENT.size:

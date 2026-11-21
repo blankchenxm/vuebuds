@@ -22,6 +22,7 @@
 #include <zephyr/bluetooth/hci.h>
 #include <zephyr/sys/byteorder.h>
 #include <bluetooth/hci_vs_sdc.h>
+#include <hal/nrf_rtc.h>
 
 #include "central.h"
 #include "usb.h"
@@ -539,6 +540,40 @@ void centralTimedWrite(uint8_t mask, uint16_t delay_ms, uint8_t cmd)
     }
   }
   text(-1, "timed 0x%02x at %u.%03u ms (bridge clock)", cmd, (uint32_t)(t_us / 1000), (uint32_t)(t_us % 1000));
+}
+
+bool centralNowUs(uint64_t *us)
+{
+  /* The controller clock is RTC0 (32768 Hz, 24 bits, owned by MPSL; reading it is harmless).
+   * Its upper bits come from the newest anchor point, which is at most a few events old. */
+  uint64_t anchor = 0;
+  k_spinlock_key_t key = k_spin_lock(&anchorLock);
+  uint32_t ticks = nrf_rtc_counter_get(NRF_RTC0);
+  for (int i = 0; i < CENTRAL_SLOTS; i++) {
+    if (slots[i].anchorValid) {
+      anchor = MAX(anchor, slots[i].anchorUs);
+    }
+  }
+  k_spin_unlock(&anchorLock, key);
+  if (anchor == 0) {
+    *us = 0;
+    return false;
+  }
+  uint64_t anchor_ticks = anchor * 512u / 15625u;
+  int32_t d = (int32_t)(((ticks - (uint32_t)anchor_ticks) & 0xFFFFFFu) << 8) >> 8;  // signed 24 bits
+  *us = (anchor_ticks + d) * 15625u / 512u;
+  return true;
+}
+
+void centralTimeReply(uint32_t token)
+{
+  uint8_t msg[13];
+  uint64_t now;
+  bool ok = centralNowUs(&now);
+  sys_put_le32(token, &msg[0]);
+  sys_put_le64(now, &msg[4]);
+  msg[12] = ok;
+  usbSendFrame(FRAME_TIME, 0xFF, msg, sizeof(msg));
 }
 
 void centralDisconnect(uint8_t mask)

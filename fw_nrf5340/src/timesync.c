@@ -235,6 +235,26 @@ void timesyncCancelWake(void)
 
 /* ---- commands ---- */
 
+/* Bridge minus local clock at the latest anchor, once per reference (every 5 s): its change is the
+ * crystals' drift; the jitter around a straight line is the sync noise (hub #39 step 3). */
+static void logOffset(void)
+{
+  static int64_t last_offset;
+  static uint64_t last_local;
+  uint64_t b, l;
+  if (!bridgeAtLocalAnchor(&b, &l)) {
+    return;
+  }
+  int64_t offset = (int64_t)(b - l);
+  int32_t change = last_local ? (int32_t)(offset - last_offset) : 0;
+  uint32_t since_ms = last_local ? (uint32_t)((l - last_local) / 1000) : 0;
+  NRF_LOG_RAW_INFO("%08d [sync] ref: bridge - local = %d.%03d ms, %+d us in %u ms, local %u ms\n", systemTimeGetMs(),
+                   (int32_t)(offset / 1000), (int32_t)((offset < 0 ? -offset : offset) % 1000), change, since_ms,
+                   (uint32_t)(l / 1000));
+  last_offset = offset;
+  last_local = l;
+}
+
 bool timesyncCommand(const ble_command_t *cmd, uint64_t *local_us)
 {
   const uint8_t *d = cmd->data;
@@ -244,6 +264,7 @@ bool timesyncCommand(const ble_command_t *cmd, uint64_t *local_us)
   m_ref.us = sys_get_le64(&d[1]);
   m_ref.counter = sys_get_le16(&d[9]);
   m_ref.valid = true;
+  logOffset();
   if (d[0] != TIMESYNC_CMD_SNAPSHOT_AT || cmd->len < 19) {
     return false;
   }
