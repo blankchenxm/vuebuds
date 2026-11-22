@@ -135,6 +135,25 @@ static uint8_t onNotify(struct bt_conn *conn, struct bt_gatt_subscribe_params *p
   return BT_GATT_ITER_CONTINUE;
 }
 
+// The CCC write is done: the board sends notifications from now on (until then a reply to a
+// command written right after "ready" was lost, hub #68: R_NONE 5 right after a reconnect).
+static void onSubscribed(struct bt_conn *conn, uint8_t err, struct bt_gatt_subscribe_params *params)
+{
+  slot_t *s = CONTAINER_OF(params, slot_t, sub);
+  int i = s - slots;
+  if (err) {
+    text(i, "subscribe failed (CCC write 0x%02x)", err);
+    return;
+  }
+  if (s->ready || !s->connected || s->conn != conn) {
+    return;
+  }
+  s->ready = true;
+  text(i, "ready: data 0x%04x, control 0x%04x", s->dataHandle, s->controlHandle);
+  scheduleReference();
+  sendEvent(i, CENTRAL_READY, 0);
+}
+
 static void subscribe(int i)
 {
   slot_t *s = &slots[i];
@@ -151,6 +170,7 @@ static void subscribe(int i)
   }
   memset(&s->sub, 0, sizeof(s->sub));
   s->sub.notify = onNotify;
+  s->sub.subscribe = onSubscribed;
   s->sub.value = BT_GATT_CCC_NOTIFY;
   s->sub.value_handle = s->dataHandle;
   s->sub.ccc_handle = BT_GATT_AUTO_DISCOVER_CCC_HANDLE;
@@ -161,12 +181,7 @@ static void subscribe(int i)
     text(i, "subscribe failed (%d)", err);
     return;
   }
-  s->subscribed = true;
-  // Notifications are on once the CCC write is sent; the board starts nothing until a command.
-  s->ready = true;
-  text(i, "ready: data 0x%04x, control 0x%04x", s->dataHandle, s->controlHandle);
-  scheduleReference();
-  sendEvent(i, CENTRAL_READY, 0);
+  s->subscribed = true;  // ready once the CCC write is done (onSubscribed)
 }
 
 static void resubscribe(struct k_work *work)

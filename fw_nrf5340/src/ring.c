@@ -16,17 +16,77 @@
 static ring_entry_t m_index[RING_INDEX_MAX];  // circular: m_head = oldest
 static uint32_t m_head, m_count;
 static uint32_t m_write_addr;                 // where the next frame goes
-static uint64_t m_last_us;                    // for extending the 32-bit capture time
 static ring_stats_t m_stats;
 static uint8_t m_chunk[VERIFY_CHUNK];
-static bool m_ready;
+static uint8_t *m_ram;                        // NULL: PSRAM
+static uint32_t m_cap;                        // store bytes (0: no ring)
+static uint32_t m_pinned;                     // frame being sent (ringPin)
+K_MUTEX_DEFINE(ringIndexLock);
 
-bool ringInit(void)
+uint32_t ringInit(uint8_t *ram, uint32_t ram_bytes)
 {
-  m_ready = psramCheckFinish();  // boot check (psram.h): waits until 2 s after boot
+  if (psramCheckFinish()) {  // boot check (psram.h): waits until 2 s after boot
+    m_ram = NULL;
+    m_cap = RING_BYTES;
+  } else {
+    m_ram = ram;
+    m_cap = ram ? ram_bytes : 0;
+  }
   NRF_LOG_RAW_INFO("%08d [ring] %s: %u KB, index %u frames\n", systemTimeGetMs(),
-                   m_ready ? "PSRAM ready" : "NO PSRAM, ring off", RING_BYTES / 1024, RING_INDEX_MAX);
-  return m_ready;
+                   m_cap == 0 ? "NO PSRAM, ring off" : (m_ram ? "PSRAM not usable, ring in RAM" : "PSRAM ready"),
+                   m_cap / 1024, RING_INDEX_MAX);
+  return m_cap;
+}
+
+bool ringInPsram(void)
+{
+  return m_cap != 0 && m_ram == NULL;
+}
+
+uint32_t ringCapacity(void)
+{
+  return m_cap;
+}
+
+static bool storeWrite(uint32_t addr, const void *data, uint32_t n)
+{
+  if (addr + n > m_cap) {
+    return false;
+  }
+  if (m_ram) {
+    memcpy(m_ram + addr, data, n);
+    return true;
+  }
+  return psramWrite(addr, data, n);
+}
+
+static bool storeRead(uint32_t addr, void *data, uint32_t n)
+{
+  if (addr + n > m_cap) {
+    return false;
+  }
+  if (m_ram) {
+    memcpy(data, m_ram + addr, n);
+    return true;
+  }
+  return psramRead(addr, data, n);
+}
+
+void ringLock(void)
+{
+  k_mutex_lock(&ringIndexLock, K_FOREVER);
+}
+
+void ringUnlock(void)
+{
+  k_mutex_unlock(&ringIndexLock);
+}
+
+void ringPin(uint32_t seq)
+{
+  ringLock();
+  m_pinned = seq;
+  ringUnlock();
 }
 
 static ring_entry_t *slot(uint32_t i)
@@ -34,12 +94,22 @@ static ring_entry_t *slot(uint32_t i)
   return &m_index[(m_head + i) % RING_INDEX_MAX];
 }
 
-static void evictOldest(void)
+// Drop the oldest entry, unless it is the one being sent.
+static bool evictOldest(void)
 {
-  m_stats.used_bytes -= slot(0)->len;
-  m_head = (m_head + 1) % RING_INDEX_MAX;
-  m_count--;
-  m_stats.evicted++;
+  ringLock();
+  bool ok = m_pinned == 0 || slot(0)->seq != m_pinned;
+  if (ok) {
+    m_stats.used_bytes -= slot(0)->len;
+    m_head = (m_head + 1) % RING_INDEX_MAX;
+    m_count--;
+    m_stats.frames = m_count;
+    m_stats.evicted++;
+  } else {
+    m_stats.pinned_fails++;
+  }
+  ringUnlock();
+  return ok;
 }
 
 // Does [a, a + n) overlap the oldest entry?
@@ -49,44 +119,60 @@ static bool overlapsOldest(uint32_t a, uint32_t n)
   return a < o->addr + o->len && o->addr < a + n;
 }
 
-static void indexAdd(uint32_t seq, uint32_t capture_us32, uint32_t addr, uint32_t len, uint32_t crc,
-                     const camera_frame_t *frame, uint8_t format, uint8_t quality)
+// Make room for [a, a + n): drop the oldest frames it covers (and one more if the index is full).
+static bool makeRoom(uint32_t a, uint32_t n)
 {
-  // 64-bit capture time: the 32-bit us clock wraps every ~71.6 min.
-  uint64_t t = (m_last_us & ~0xFFFFFFFFull) | capture_us32;
-  if (m_count + m_stats.appended > 0 && t < m_last_us) {
-    t += 1ull << 32;
+  while (m_count > 0 && (m_count == RING_INDEX_MAX || overlapsOldest(a, n))) {
+    if (!evictOldest()) {
+      return false;
+    }
   }
-  m_last_us = t;
+  return true;
+}
 
+static void indexAdd(uint32_t seq, uint64_t capture_us, uint32_t addr, uint32_t len, uint32_t crc,
+                     const camera_frame_t *frame, uint8_t format, uint8_t quality, const ring_meta_t *meta)
+{
+  ringLock();
   ring_entry_t *e = &m_index[(m_head + m_count) % RING_INDEX_MAX];
-  *e = (ring_entry_t){.seq = seq, .capture_us = t, .addr = addr, .len = len, .crc = crc,
+  *e = (ring_entry_t){.seq = seq, .capture_us = capture_us, .addr = addr, .len = len, .crc = crc,
                       .width = frame->width, .height = frame->height, .format = format, .quality = quality};
+  if (meta) {
+    e->integration = meta->integration;
+    e->digital_gain = meta->digital_gain;
+    e->analog_gain = meta->analog_gain;
+    e->flags = meta->flags;
+  }
   m_count++;
   m_write_addr = addr + len;
   m_stats.appended++;
   m_stats.used_bytes += len;
   m_stats.frames = m_count;
+  ringUnlock();
 }
 
-bool ringAppend(const camera_frame_t *frame, uint32_t seq, uint32_t capture_us32, uint32_t *write_us)
+// Where a frame of up to n bytes goes (a frame never wraps); 0 bytes free at the end -> address 0.
+static uint32_t placeFor(uint32_t n)
 {
-  *write_us = 0;
-  if (!m_ready) {
-    return false;
-  }
-  uint32_t len = (uint32_t)frame->width * frame->height;
-  if (len > RING_BYTES) {
-    return false;
-  }
   uint32_t addr = m_write_addr;
-  if (addr + len > RING_BYTES) {
-    addr = 0;  // a frame never wraps
+  if (addr + n > m_cap) {
+    addr = 0;
     m_stats.wraps++;
   }
-  // Drop the oldest frames this one will overwrite (and one more if the index is full).
-  while (m_count > 0 && (m_count == RING_INDEX_MAX || overlapsOldest(addr, len))) {
-    evictOldest();
+  return addr;
+}
+
+bool ringAppend(const camera_frame_t *frame, uint32_t seq, uint64_t capture_us, const ring_meta_t *meta,
+                uint32_t *write_us)
+{
+  *write_us = 0;
+  uint32_t len = (uint32_t)frame->width * frame->height;
+  if (m_cap == 0 || len > m_cap) {
+    return false;
+  }
+  uint32_t addr = placeFor(len);
+  if (!makeRoom(addr, len)) {
+    return false;
   }
 
   uint32_t t0 = systemTimeGetUs();
@@ -94,12 +180,12 @@ bool ringAppend(const camera_frame_t *frame, uint32_t seq, uint32_t capture_us32
   bool ok = true;
   if (frame->stride == frame->width) {
     crc = crc32_ieee_update(crc, frame->pixels, len);
-    ok = psramWrite(addr, frame->pixels, len);
+    ok = storeWrite(addr, frame->pixels, len);
   } else {
     for (uint16_t y = 0; y < frame->height && ok; y++) {
       const uint8_t *row = frame->pixels + (uint32_t)y * frame->stride;
       crc = crc32_ieee_update(crc, row, frame->width);
-      ok = psramWrite(addr + (uint32_t)y * frame->width, row, frame->width);
+      ok = storeWrite(addr + (uint32_t)y * frame->width, row, frame->width);
     }
   }
   *write_us = systemTimeGetUs() - t0;
@@ -108,8 +194,13 @@ bool ringAppend(const camera_frame_t *frame, uint32_t seq, uint32_t capture_us32
     return false;
   }
 
-  indexAdd(seq, capture_us32, addr, len, crc, frame, BLE_FORMAT_RAW, 0);
+  indexAdd(seq, capture_us, addr, len, crc, frame, BLE_FORMAT_RAW, 0, meta);
   return true;
+}
+
+bool ringRead(const ring_entry_t *e, uint32_t offset, uint8_t *dst, uint32_t n)
+{
+  return offset + n <= e->len && storeRead(e->addr + offset, dst, n);
 }
 
 bool ringVerify(const ring_entry_t *e, uint32_t *read_us)
@@ -119,7 +210,7 @@ bool ringVerify(const ring_entry_t *e, uint32_t *read_us)
   bool ok = true;
   for (uint32_t off = 0; off < e->len && ok; off += VERIFY_CHUNK) {
     uint32_t n = MIN(VERIFY_CHUNK, e->len - off);
-    ok = psramRead(e->addr + off, m_chunk, n);
+    ok = storeRead(e->addr + off, m_chunk, n);
     crc = crc32_ieee_update(crc, m_chunk, n);
   }
   *read_us = systemTimeGetUs() - t0;
@@ -141,11 +232,23 @@ const ring_entry_t *ringNewest(void)
   return m_count ? slot(m_count - 1) : NULL;
 }
 
+bool ringHas(const ring_entry_t *e)
+{
+  ringLock();
+  bool found = false;
+  for (uint32_t i = 0; i < m_count && !found; i++) {
+    const ring_entry_t *s = slot(i);
+    found = s->seq == e->seq && s->addr == e->addr;
+  }
+  ringUnlock();
+  return found;
+}
+
 // Capture times only grow, so the index is sorted: binary search for the last entry <= t.
-const ring_entry_t *ringFindAtOrBefore(uint64_t t_us)
+static int32_t lastAtOrBefore(uint64_t t_us)
 {
   if (m_count == 0 || slot(0)->capture_us > t_us) {
-    return NULL;
+    return -1;
   }
   uint32_t lo = 0, hi = m_count - 1;
   while (lo < hi) {
@@ -156,23 +259,56 @@ const ring_entry_t *ringFindAtOrBefore(uint64_t t_us)
       hi = mid - 1;
     }
   }
-  return slot(lo);
+  return (int32_t)lo;
+}
+
+const ring_entry_t *ringFindAtOrBefore(uint64_t t_us)
+{
+  int32_t i = lastAtOrBefore(t_us);
+  return i < 0 ? NULL : slot(i);
+}
+
+uint32_t ringFirstAtOrAfter(uint64_t t_us)
+{
+  int32_t i = lastAtOrBefore(t_us);
+  if (i >= 0 && slot(i)->capture_us == t_us) {
+    return (uint32_t)i;
+  }
+  return (uint32_t)(i + 1);
 }
 
 const ring_entry_t *ringFindNearest(uint64_t t_us)
 {
-  const ring_entry_t *before = ringFindAtOrBefore(t_us);
-  if (before == NULL) {
+  int32_t i = lastAtOrBefore(t_us);
+  if (i < 0) {
     return m_count ? slot(0) : NULL;
   }
-  uint32_t i = (uint32_t)((before - m_index + RING_INDEX_MAX - m_head) % RING_INDEX_MAX);
-  if (i + 1 < m_count) {
+  const ring_entry_t *before = slot(i);
+  if ((uint32_t)i + 1 < m_count) {
     const ring_entry_t *after = slot(i + 1);
     if (after->capture_us - t_us < t_us - before->capture_us) {
       return after;
     }
   }
   return before;
+}
+
+// Frame numbers grow by one per stored frame, but a failed append leaves a gap: binary search.
+const ring_entry_t *ringFindSeq(uint32_t seq)
+{
+  if (m_count == 0 || seq < slot(0)->seq || seq > slot(m_count - 1)->seq) {
+    return NULL;
+  }
+  uint32_t lo = 0, hi = m_count - 1;
+  while (lo < hi) {
+    uint32_t mid = (lo + hi) / 2;
+    if (slot(mid)->seq < seq) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return slot(lo)->seq == seq ? slot(lo) : NULL;
 }
 
 const ring_stats_t *ringStats(void)
@@ -192,15 +328,12 @@ typedef struct {
 static int32_t sinkWrite(codec_io_t *io, const uint8_t *data, int32_t len)
 {
   ring_sink_t *s = io->ctx;
-  if (s->pos + len > s->cap) {
+  if (s->failed || s->pos + len > s->cap) {
     s->failed = true;
     return 0;
   }
   uint32_t a = s->base + s->pos;
-  while (m_count > 0 && (m_count == RING_INDEX_MAX || overlapsOldest(a, len))) {
-    evictOldest();
-  }
-  if (!psramWrite(a, data, len)) {
+  if (!makeRoom(a, len) || !storeWrite(a, data, len)) {
     s->failed = true;
     return 0;
   }
@@ -228,19 +361,15 @@ static int32_t noSeek(codec_io_t *io, int32_t position)
   return -1;
 }
 
-bool ringAppendJpeg(const camera_frame_t *frame, uint8_t quality, uint32_t seq, uint32_t capture_us32,
-                    uint32_t *encode_us)
+bool ringAppendJpeg(const camera_frame_t *frame, uint8_t quality, uint32_t seq, uint64_t capture_us,
+                    const ring_meta_t *meta, uint32_t *encode_us)
 {
   *encode_us = 0;
-  if (!m_ready) {
+  uint32_t cap = (uint32_t)frame->width * frame->height;  // a JPEG larger than the raw frame fails
+  if (m_cap == 0 || cap > m_cap) {
     return false;
   }
-  uint32_t cap = (uint32_t)frame->width * frame->height;  // a JPEG larger than the raw frame fails
-  uint32_t addr = m_write_addr;
-  if (addr + cap > RING_BYTES) {
-    addr = 0;
-    m_stats.wraps++;
-  }
+  uint32_t addr = placeFor(cap);
   ring_sink_t s = {.io = {sinkWrite, noRead, noSeek, NULL}, .base = addr, .cap = cap};
   s.io.ctx = &s;
   uint32_t t0 = systemTimeGetUs();
@@ -248,11 +377,12 @@ bool ringAppendJpeg(const camera_frame_t *frame, uint8_t quality, uint32_t seq, 
   *encode_us = systemTimeGetUs() - t0;
   if (n <= 0 || s.failed || (uint32_t)n != s.pos) {
     m_stats.write_errors++;
-    NRF_LOG_RAW_INFO("[ring] JPEG q%u failed: %d, %u B written%s\n", quality, n, s.pos, s.failed ? ", sink full / write error" : "");
+    NRF_LOG_RAW_INFO("[ring] JPEG q%u failed: %d, %u B written%s\n", quality, n, s.pos,
+                     s.failed ? ", sink full / write error / frame being sent" : "");
     m_write_addr = addr;  // the partial output is garbage; evicted frames stay evicted
     return false;
   }
-  indexAdd(seq, capture_us32, addr, (uint32_t)n, s.crc, frame, BLE_FORMAT_JPEG, quality);
+  indexAdd(seq, capture_us, addr, (uint32_t)n, s.crc, frame, BLE_FORMAT_JPEG, quality, meta);
   return true;
 }
 
@@ -263,7 +393,7 @@ typedef struct {
 static int fetchRows(void *ctx, int y, uint8_t *band)
 {
   const ring_entry_t *e = ((fetch_ctx_t *)ctx)->e;
-  return psramRead(e->addr + (uint32_t)y * e->width, band, (uint32_t)e->width * 8) ? 0 : -1;
+  return storeRead(e->addr + (uint32_t)y * e->width, band, (uint32_t)e->width * 8) ? 0 : -1;
 }
 
 int32_t ringFetchJpeg(const ring_entry_t *e, uint8_t quality, uint8_t *band, uint32_t *us)
@@ -282,8 +412,9 @@ int32_t ringFetchJpeg(const ring_entry_t *e, uint8_t quality, uint8_t *band, uin
 
 void ringReset(void)
 {
+  ringLock();
   m_head = m_count = 0;
   m_write_addr = 0;
-  m_last_us = 0;
   memset(&m_stats, 0, sizeof(m_stats));
+  ringUnlock();
 }

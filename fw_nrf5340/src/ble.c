@@ -6,7 +6,8 @@
  *                   flags bit1 is set and it begins with ble_frame_header_t (v2, ble.h)
  *   control ...1403  write 0xB1: start the camera stream (read / notify, 1 byte)
  *                    write 0xB2: take one picture (not in fw/; see snapshot.h)
- *                    longer writes (0xB3 ...): commands for the main thread (image.c)
+ *                    longer writes (0xB3 ...): commands for the main thread (image.c, ringcmd.c)
+ *   data packets with flags bit2 are M2 replies [seq, 0x04, type, ...] (ringcmd.h)
  * Like fw/, turning data notifications off or disconnecting reboots the chip.
  */
 #include <string.h>
@@ -27,6 +28,7 @@
 #define ADV_INTERVAL 300  // 187.5 ms in 0.625 ms units, as fw/main.h APP_ADV_INTERVAL
 #define PACKET_FLAG_START_OF_FRAME 0x01
 #define PACKET_FLAG_HEADER_V2 0x02
+#define PACKET_FLAG_REPLY 0x04  // M2 reply packet (R_STATUS ..., ble.h)
 #define CMD_STREAM_START 0xB1
 #define CMD_STREAM_STOP 0xB0
 #define CMD_SNAPSHOT 0xB2
@@ -45,6 +47,9 @@ static uint8_t packet[CONFIG_BT_L2CAP_TX_MTU];
 K_SEM_DEFINE(notifySlots, NOTIFY_IN_FLIGHT, NOTIFY_IN_FLIGHT);
 BUILD_ASSERT(sizeof(ble_frame_header_t) == 22, "frame header v2 is 22 bytes (host/protocol.py HEADER_V2)");
 K_MSGQ_DEFINE(commandQueue, sizeof(ble_command_t), 8, 4);
+// Data notifications come from the main thread (stream, pictures) and the ring sender thread
+// (ringcmd.c): one frame's packets go out back to back, replies between frames (recursive).
+K_MUTEX_DEFINE(txLock);
 
 static void dataCccChanged(const struct bt_gatt_attr *attr, uint16_t value)
 {
@@ -193,6 +198,8 @@ void bleInit(void)
   NRF_LOG_RAW_INFO("%08d [ble] advertising\n", systemTimeGetMs());
 }
 
+static bool sendImage(const ble_frame_header_t *header, ble_reader_t read, void *ctx);
+
 static void notifyDone(struct bt_conn *conn, void *user_data)
 {
   k_sem_give(&notifySlots);
@@ -230,7 +237,43 @@ bool bleNextCommand(ble_command_t *cmd)
   return k_msgq_get(&commandQueue, cmd, K_NO_WAIT) == 0;
 }
 
+void bleLock(void)
+{
+  k_mutex_lock(&txLock, K_FOREVER);
+}
+
+void bleUnlock(void)
+{
+  k_mutex_unlock(&txLock);
+}
+
+bool bleSendReply(uint8_t type, const void *data, uint16_t len)
+{
+  bleLock();
+  bool ok = false;
+  if (currentConn != NULL && 3u + len <= MIN(bt_gatt_get_mtu(currentConn) - 3, sizeof(packet))) {
+    packet[0] = sequenceNumber;
+    packet[1] = PACKET_FLAG_REPLY;
+    packet[2] = type;
+    memcpy(&packet[3], data, len);
+    ok = sendPacket(3 + len);
+    if (ok) {
+      sequenceNumber++;
+    }
+  }
+  bleUnlock();
+  return ok;
+}
+
 bool bleSendImage(const ble_frame_header_t *header, ble_reader_t read, void *ctx)
+{
+  bleLock();
+  bool ok = sendImage(header, read, ctx);
+  bleUnlock();
+  return ok;
+}
+
+static bool sendImage(const ble_frame_header_t *header, ble_reader_t read, void *ctx)
 {
   if (currentConn == NULL) {
     return false;

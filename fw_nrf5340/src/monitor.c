@@ -150,7 +150,7 @@ static void ringStore(uint32_t s, uint32_t seq, uint32_t start_us)
   uint32_t write_us, new_us = 0, old_us = 0;
   uint8_t q = m_cfg_q[m_cfg];
   bool stored = cameraSlotFrame(s, &f) &&
-                (q ? ringAppendJpeg(&f, q, seq, start_us, &write_us) : ringAppend(&f, seq, start_us, &write_us));
+                (q ? ringAppendJpeg(&f, q, seq, start_us, NULL, &write_us) : ringAppend(&f, seq, start_us, NULL, &write_us));
   m_cfg_frames++;
   if (!stored) {
     NRF_LOG_RAW_INFO("%08d [ring] seq %u: NOT stored (write errors %u)\n", systemTimeGetMs(), seq,
@@ -222,7 +222,7 @@ void monitorStart(void)
     cameraSleepOnFrameBoundary();
   }
 #ifdef MONITOR_RING
-  ringInit();
+  ringInit(NULL, 0);
 #if defined(RING_TEST_CYCLE) || (defined(RING_JPEG_Q) && RING_JPEG_Q > 0)
   {
     // Encoder workspace + an 8-row band after the Monitor slots; give up slots until it fits.

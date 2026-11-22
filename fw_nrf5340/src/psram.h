@@ -7,7 +7,7 @@
  * (0x0B / 0x02) both work, but on the DK's jumper wires quad reads break off when all four
  * data lines go high at once (2026-10-14, src/hw_test.c), so the default is single line at
  * 48 MHz in 32 B bursts: CE# low ~6.5 us, under tCEM (8 us for the 3 V part, measured on the
- * pin). Main thread only; polled, no interrupt. Boot check: psramCheckStart() below.
+ * pin). Polled, no interrupt; psramWrite / psramRead hold a mutex (main + ring sender thread). Boot check: psramCheckStart() below.
  */
 #ifndef PSRAM_H_
 #define PSRAM_H_

@@ -39,13 +39,21 @@ merged.hex --sectorerase --verify --reset`). Sysbuild passes image options as
 - Connects one board at a time, reconnects after a drop (the boards reboot on disconnect).
 - PHY / data length / MTU / discovery run on the system work queue: called from the connected
   callback (BT RX thread) they deadlock (`Controller unresponsive, opcode 0x2032`).
+- **Ready** (`E` event state 2) is sent once the data CCC write is done (2026-11-21, hub #68; was:
+  when it was sent, ~60 ms earlier, so a board's reply to a command written right at "ready" could
+  be lost).
+- **Time sync** (plan E, hub INTERFACES C1 / D): the bridge's time = its controller RTC0 in µs, wraps
+  counted on the bridge, from boot. Every 5 s and with each `T` it sends `0xB5 [anchor u64][counter
+  u16]` to the boards; `T [mask][delay ms u16][cmd]` sends `0xB7 … [T u64]` (T = newest anchor +
+  delay) and answers `T [cmd][T u64]` (slot 0xFF); `Q [token u32]` answers `Q [token][now u64][ok]`.
+  Restarts at 0 when the bridge reboots. `host/bridge_clock_test.py`, `host/timesync_test.py`.
 
 ## USB protocol
 
 See `host/bridge.py` (PC side) and `src/main.c`. Frames are `[A5 5A][type][slot][len u16][payload]`
 to the PC (`N` notification, `E` link event, `S` text, `W` write result) and
 `[A5 5A][cmd][len u16][payload]` from the PC (`I`, `C` configure, `W` control write to a slot mask,
-`X` disconnect). Slot numbers replace the paper's MAC prefix; the `E` event carries the address.
+`X` disconnect, `Q` time query, `T` timed write; replies `Q` / `T` with slot 0xFF). Slot numbers replace the paper's MAC prefix; the `E` event carries the address.
 
 ## Measured (2026-10-11, QVGA unless noted, 0 lost packets in every run)
 

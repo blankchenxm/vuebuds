@@ -25,6 +25,7 @@ uint32_t cameraSlotCount(void);            // frame pool slots for the compiled 
 void cameraSensorStream(void);             // MCLK on + sensor streaming, nothing armed
 void cameraWake(void);                     // S2 off: MCLK on, then XSLEEP high
 bool cameraWakeAt(uint64_t local_us);      // the same at a timesync local time (hardware); false: too late
+bool cameraCancelWakeAt(void);             // undo cameraWakeAt() if it is still > 3 ms away (sensor asleep again)
 void cameraSleepOnFrameBoundary(void);     // S2 on: XSLEEP low on the next FVLD fall (PPI) ...
 void cameraAsleep(void);                   // ... EVENT_CAMERA_ASLEEP: then MCLK off
 bool cameraIsAsleep(void);                 // XSLEEP low and MCLK off

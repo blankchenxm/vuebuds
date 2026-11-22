@@ -31,11 +31,36 @@ bool snapshotActive(void);     // a picture has been requested since boot
  * a picture every period (100-60000 ms) on the 32.768 kHz clock, the first one right away, the
  * same way as 0xB2; mode 0 stops. A period that comes while the previous picture is still being
  * taken or sent is skipped (not queued): the next picture has BLE_HEADER_SKIPPED. Timed pictures
- * carry BLE_HEADER_TIMED, so a 0xB2 in between can be told apart. Mode 2 (ring buffer) is not here.
+ * carry BLE_HEADER_TIMED, so a 0xB2 in between can be told apart.
+ * Mode 2 (ring buffer, M2, ringcmd.h): snapshotRingStart(). Modes 1 and 2 exclude each other.
  */
 #define SNAPSHOT_CMD_TIMED 0xB8
-void snapshotTimedCommand(const uint8_t *data, uint8_t len);
+#define SNAPSHOT_PERIOD_MIN_MS 100
+#define SNAPSHOT_PERIOD_MAX_MS 60000
+void snapshotTimedCommand(const uint8_t *data, uint8_t len);  // modes 0 and 1
 void snapshotTimedTick(void);  // EVENT_CAMERA_TIMED
 void snapshotExposureChanged(void);  // after 0xB6: manual -> wake and stay awake, auto -> sleep again
+
+/*
+ * Ring buffer (0xB8 2 <period>): a picture at every multiple of the period on the bridge's clock
+ * (hardware wake, timesync.h), stored in the ring (ringcmdStore), not sent. The first start after
+ * boot takes one picture at once to start the sensor (not stored). A capture time that comes while
+ * the previous picture is still being taken or stored is skipped (snapshotRingSkips). While the
+ * ring runs, 0xB2 takes a picture now (an armed ring picture more than 3 ms away is given up; one
+ * already under way is the answer instead), stores it and sends it with R_FRAME.
+ * Fixed exposure (sensor awake): the first frame after each capture time.
+ */
+#define SNAPSHOT_MODE_STOPPED 0
+#define SNAPSHOT_MODE_TIMED 1
+#define SNAPSHOT_MODE_RING 2
+void snapshotRingStart(uint16_t period_ms);  // from stopped / timed, or a new period
+void snapshotRingDue(void);                  // EVENT_CAMERA_RING_DUE
+void snapshotStop(void);                     // 0xB8 0: timed capture or ring
+uint8_t snapshotMode(void);                  // SNAPSHOT_MODE_*
+uint16_t snapshotPeriodMs(void);             // of the running mode (0: stopped)
+uint32_t snapshotRingSkips(void);            // since the ring started
+/* 0xB1 after 0xB8 0 (sw-mac, INTERFACES C2): stop taking pictures, wake the sensor for the stream.
+ * false while a picture or a mode is running. */
+bool snapshotHandOver(void);
 
 #endif

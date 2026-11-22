@@ -11,6 +11,8 @@
 #include "capture.h"
 #include "event.h"
 #include "timers.h"
+#include "timesync.h"
+#include "ringcmd.h"
 #include "snapshot.h"
 
 #define SNAPSHOT_SLOT 0
@@ -18,33 +20,83 @@
 // Bad frame (wrong DMA byte count / overflow, not sent): take the next frame instead, so the
 // host still gets a picture (seen 10-08 on HM0360B VGA: OVERFLOW with right byte counts, 5 of 25).
 #define SNAPSHOT_MAX_RETAKES 2
+// Ring buffer: the next capture time is at least this far ahead when it is armed (the hardware
+// wake needs 3 ms: MCLK 2 ms before XSLEEP, timesync.c).
+#define RING_LEAD_US 5000
+
+typedef enum {
+  PIC_REQUEST,  // 0xB2 / 0xB7 (stored in the ring too while the ring runs)
+  PIC_TIMED,    // 0xB8 1
+  PIC_RING,     // 0xB8 2
+  PIC_WARMUP,   // first picture after boot for 0xB8 2: starts the sensor, not stored
+} picture_kind_t;
 
 static bool m_started;
-static volatile bool m_busy;  // woken / armed, frame not sent yet (read by the timed capture's timer)
+static volatile bool m_busy;  // woken / armed, frame not done yet (read by the timed capture's timer)
 static bool m_s2;         // HM0360: S2 sleep between pictures
 static uint32_t m_count;
 static uint8_t m_retakes;  // bad frames retaken for the current request
 static uint32_t m_request_ms;
-static bool m_timed_picture;  // the picture in progress was started by the timed capture
+static picture_kind_t m_kind;  // of the picture in progress
 static volatile bool m_skipped;  // a timed period was skipped since the last timed picture
 static volatile uint32_t m_timed_skips, m_skips_logged;
 static uint32_t m_timed_period_ms, m_timed_taken;
+// Ring buffer (0xB8 2)
+static uint32_t m_ring_period_ms;  // 0: off
+static uint64_t m_ring_T;          // bridge time of the armed ring picture
+static uint64_t m_ring_last_T;     // of the last ring picture taken (0: none since the start / period change)
+static uint32_t m_ring_skips;
+static bool m_ring_send;           // a 0xB2 came during the ring picture in progress: send it too
+static bool m_ring_due_pending;    // fixed exposure: waiting for the due timer
 
-static void request(bool timed);
+static void request(picture_kind_t kind);
+static void ringSchedule(void);
+
+static void ringDue(struct k_timer *timer)
+{
+  eventQueuePush(EVENT_CAMERA_RING_DUE);
+}
+static K_TIMER_DEFINE(m_ring_due_timer, ringDue, NULL);
+
+// Give up the armed (not yet started) ring picture; false if it is already under way.
+static bool ringCancelArmed(void)
+{
+  if (!m_busy || m_kind != PIC_RING) {
+    return false;
+  }
+  if (m_ring_due_pending) {
+    k_timer_stop(&m_ring_due_timer);
+    m_ring_due_pending = false;
+  } else if (!cameraCancelWakeAt()) {
+    return false;
+  }
+  m_busy = false;
+  return true;
+}
 
 void snapshotRequest(void)
 {
-  request(false);
+  if (m_busy && m_kind == PIC_RING && m_ring_period_ms) {
+    if (ringCancelArmed()) {
+      NRF_LOG_RAW_INFO("%08d [snap] 0xB2: ring picture at %u ms given up, taking one now\n", systemTimeGetMs(),
+                       (uint32_t)(m_ring_T / 1000));
+    } else {
+      m_ring_send = true;  // the ring picture under way is the answer
+      NRF_LOG_RAW_INFO("%08d [snap] 0xB2 during a ring picture: that one is sent\n", systemTimeGetMs());
+      return;
+    }
+  }
+  request(PIC_REQUEST);
 }
 
-static void request(bool timed)
+static void request(picture_kind_t kind)
 {
   if (m_busy) {
     NRF_LOG_RAW_INFO("%08d [snap] busy, request ignored\n", systemTimeGetMs());
     return;
   }
   m_request_ms = systemTimeGetMs();
-  m_timed_picture = timed;
+  m_kind = kind;
   if (!m_started) {
     cameraInit();
     if (cameraModelId() == 0) {
@@ -68,13 +120,14 @@ static void request(bool timed)
 
 void snapshotRequestAt(uint64_t local_us)
 {
-  if (m_busy || !m_started || !m_s2 || cameraExposureManual() || !cameraIsAsleep()) {
-    NRF_LOG_RAW_INFO("%08d [snap] timed request taken now (busy %d, started %d, asleep %d)\n", systemTimeGetMs(),
-                     m_busy, m_started, cameraIsAsleep());
+  if (m_busy || !m_started || !m_s2 || cameraExposureManual() || !cameraIsAsleep() || m_ring_period_ms) {
+    NRF_LOG_RAW_INFO("%08d [snap] timed request taken now (busy %d, started %d, asleep %d, ring %d)\n",
+                     systemTimeGetMs(), m_busy, m_started, cameraIsAsleep(), m_ring_period_ms != 0);
     snapshotRequest();
     return;
   }
   m_request_ms = systemTimeGetMs();
+  m_kind = PIC_REQUEST;
   cameraArmSlot(SNAPSHOT_SLOT, 0);
   if (!cameraWakeAt(local_us)) {
     NRF_LOG_RAW_INFO("%08d [snap] wake time too close, waking now\n", systemTimeGetMs());
@@ -103,16 +156,36 @@ void snapshotFrameDone(void)
   }
   if (ok) {
     imagePrepare(&frame);  // exposure over I2C: before S2, which turns I2C off (~3 ms of the 13)
-    if (m_timed_picture) {
+    if (m_kind == PIC_TIMED) {
       imageAddFlags(BLE_HEADER_TIMED | (m_skipped ? BLE_HEADER_SKIPPED : 0));
       m_skipped = false;
     }
   }
-  if (m_s2 && !cameraExposureManual()) {
+  bool sleep = m_s2 && !cameraExposureManual();
+  if (sleep) {
     // Capture ends ~13 ms (VGA ~28 ms) before the frame boundary, where DPPI pulls XSLEEP low.
     cameraSleepOnFrameBoundary();
   }
-  if (ok) {
+  picture_kind_t kind = m_kind;
+  if (kind == PIC_RING) {
+    m_ring_last_T = m_ring_T;
+  }
+  if (!ok) {
+    if (kind == PIC_RING) {
+      m_ring_skips++;
+    }
+  } else if (kind == PIC_WARMUP) {
+    NRF_LOG_RAW_INFO("%08d [snap] sensor started for the ring (picture not stored)\n", systemTimeGetMs());
+  } else if ((kind == PIC_RING || kind == PIC_REQUEST) && m_ring_period_ms) {
+    // Ring buffer running: stored; a 0xB2 picture also goes out (R_FRAME + frame).
+    bool send = kind == PIC_REQUEST || m_ring_send;
+    m_ring_send = false;
+    if (!ringcmdStore(&frame, send) && kind == PIC_RING) {
+      m_ring_skips++;
+    }
+  } else if (kind == PIC_RING) {
+    // Stopped (0xB8 0) while this picture was under way: not stored.
+  } else {
     m_count++;
     imageSend(&frame);
     NRF_LOG_RAW_INFO("%08d [snap] picture %u sent, %u ms after the request\n", systemTimeGetMs(), m_count,
@@ -120,11 +193,17 @@ void snapshotFrameDone(void)
   }
   m_busy = false;
   m_retakes = 0;
+  if (!sleep) {
+    ringSchedule();  // fixed exposure / HM01B0: no sleep to wait for
+  }
 }
 
 void snapshotAsleep(void)
 {
   cameraAsleep();
+  if (cameraIsAsleep()) {
+    ringSchedule();
+  }
 }
 
 // The wake meters the scene and can overwrite the values written right after it (10-11: one
@@ -156,7 +235,38 @@ bool snapshotActive(void)
   return m_started;
 }
 
-// ---- timed capture (0xB8) ----
+uint8_t snapshotMode(void)
+{
+  return m_ring_period_ms ? SNAPSHOT_MODE_RING : (m_timed_period_ms ? SNAPSHOT_MODE_TIMED : SNAPSHOT_MODE_STOPPED);
+}
+
+uint16_t snapshotPeriodMs(void)
+{
+  return (uint16_t)(m_ring_period_ms ? m_ring_period_ms : m_timed_period_ms);
+}
+
+uint32_t snapshotRingSkips(void)
+{
+  return m_ring_skips;
+}
+
+bool snapshotHandOver(void)
+{
+  if (!m_started) {
+    return true;
+  }
+  if (m_busy || m_ring_period_ms || m_timed_period_ms || !(cameraIsAsleep() || cameraExposureManual() || !m_s2)) {
+    return false;
+  }
+  if (m_s2 && cameraIsAsleep()) {
+    cameraWake();
+  }
+  m_started = false;
+  NRF_LOG_RAW_INFO("%08d [snap] pictures stopped: handing the sensor over to the stream (0xB1)\n", systemTimeGetMs());
+  return true;
+}
+
+// ---- timed capture (0xB8 1) ----
 
 // Decided at the expiry (timer interrupt), not when the main thread gets to the event: the main
 // thread is blocked while a picture is queued for BLE, so a queued expiry would take the next
@@ -172,24 +282,44 @@ static void timedExpiry(struct k_timer *timer)
 }
 static K_TIMER_DEFINE(m_timed_timer, timedExpiry, NULL);
 
-#define TIMED_MIN_MS 100
-#define TIMED_MAX_MS 60000
+static void timedStop(void)
+{
+  if (m_timed_period_ms) {
+    k_timer_stop(&m_timed_timer);
+    NRF_LOG_RAW_INFO("%08d [timed] stop: %u taken, %u skipped\n", systemTimeGetMs(), m_timed_taken, m_timed_skips);
+    m_timed_period_ms = 0;
+  }
+}
+
+static void ringStop(void)
+{
+  if (m_ring_period_ms) {
+    ringCancelArmed();  // an armed picture is dropped; one already under way is not stored
+    NRF_LOG_RAW_INFO("%08d [ring] stop: %u skipped\n", systemTimeGetMs(), m_ring_skips);
+    m_ring_period_ms = 0;
+  }
+}
+
+void snapshotStop(void)
+{
+  timedStop();
+  ringStop();
+}
 
 void snapshotTimedCommand(const uint8_t *data, uint8_t len)
 {
   uint8_t mode = len >= 2 ? data[1] : 0xFF;
   if (mode == 0) {
-    k_timer_stop(&m_timed_timer);
-    NRF_LOG_RAW_INFO("%08d [timed] stop: %u taken, %u skipped\n", systemTimeGetMs(), m_timed_taken, m_timed_skips);
-    m_timed_period_ms = 0;
+    snapshotStop();
     return;
   }
   uint16_t period = len >= 4 ? (uint16_t)(data[2] | (data[3] << 8)) : 0;
-  if (mode != 1 || period < TIMED_MIN_MS || period > TIMED_MAX_MS) {
-    NRF_LOG_RAW_INFO("%08d [timed] bad command: mode %u, period %u ms (%u bytes)%s\n", systemTimeGetMs(), mode, period,
-                     len, mode == 2 ? ", ring buffer not in this build" : "");
+  if (mode != 1 || period < SNAPSHOT_PERIOD_MIN_MS || period > SNAPSHOT_PERIOD_MAX_MS) {
+    NRF_LOG_RAW_INFO("%08d [timed] bad command: mode %u, period %u ms (%u bytes)\n", systemTimeGetMs(), mode, period,
+                     len);
     return;
   }
+  ringStop();  // 0xB8 1 and 0xB8 2 exclude each other: the later one wins
   // From stopped: the first picture right away. A new period while running: from now on.
   bool running = m_timed_period_ms != 0;
   m_timed_period_ms = period;
@@ -218,5 +348,81 @@ void snapshotTimedTick(void)
     return;
   }
   m_timed_taken++;
-  request(true);
+  request(PIC_TIMED);
+}
+
+// ---- ring buffer (0xB8 2, ringcmd.h) ----
+
+void snapshotRingStart(uint16_t period_ms)
+{
+  timedStop();
+  bool running = m_ring_period_ms != 0;
+  if (!running) {
+    m_ring_skips = 0;
+  }
+  m_ring_period_ms = period_ms;
+  m_ring_last_T = 0;  // no skips counted across a start / period change
+  NRF_LOG_RAW_INFO("%08d [ring] every %u ms on the bridge's clock%s\n", systemTimeGetMs(), period_ms,
+                   running ? " (new period)" : "");
+  if (!m_started) {
+    request(PIC_WARMUP);  // camera init; the ring starts once the sensor is asleep
+    return;
+  }
+  if (m_busy && !ringCancelArmed()) {
+    return;  // scheduled when the picture under way is done
+  }
+  if (!m_s2 || cameraExposureManual() || cameraIsAsleep()) {
+    ringSchedule();
+  }
+}
+
+// Arm the next ring picture: the next multiple of the period on the bridge's clock.
+static void ringSchedule(void)
+{
+  if (!m_ring_period_ms || m_busy || !m_started) {
+    return;
+  }
+  uint64_t now_l = timesyncLocalUs(), now_b, local;
+  uint64_t P = (uint64_t)m_ring_period_ms * 1000;
+  if (!timesyncLocalToBridge(now_l, &now_b)) {
+    NRF_LOG_RAW_INFO("%08d [ring] no time reference, retry in 100 ms\n", systemTimeGetMs());
+    m_ring_due_pending = false;
+    k_timer_start(&m_ring_due_timer, K_MSEC(100), K_NO_WAIT);
+    return;
+  }
+  uint64_t T = (now_b / P + 1) * P;
+  if (T < now_b + RING_LEAD_US) {
+    T += P;
+  }
+  if (m_ring_last_T && T > m_ring_last_T + P) {
+    uint32_t missed = (uint32_t)((T - m_ring_last_T) / P) - 1;
+    m_ring_skips += missed;
+    NRF_LOG_RAW_INFO("%08d [ring] %u capture time(s) skipped, %u so far\n", systemTimeGetMs(), missed, m_ring_skips);
+  }
+  m_ring_T = T;
+  timesyncBridgeToLocal(T, &local);
+  m_kind = PIC_RING;
+  m_request_ms = systemTimeGetMs() + (uint32_t)((local - now_l) / 1000);
+  m_busy = true;
+  if (m_s2 && !cameraExposureManual()) {
+    cameraArmSlot(SNAPSHOT_SLOT, 0);
+    if (!cameraWakeAt(local)) {
+      NRF_LOG_RAW_INFO("%08d [ring] hardware wake failed, waking now\n", systemTimeGetMs());
+      cameraWake();
+    }
+  } else {
+    // Sensor awake (fixed exposure / HM01B0): the next frame after T.
+    m_ring_due_pending = true;
+    k_timer_start(&m_ring_due_timer, K_USEC(local - now_l), K_NO_WAIT);
+  }
+}
+
+void snapshotRingDue(void)
+{
+  if (m_ring_due_pending) {
+    m_ring_due_pending = false;
+    cameraArmSlot(SNAPSHOT_SLOT, 0);
+  } else if (!m_busy) {
+    ringSchedule();  // retry after no time reference
+  }
 }

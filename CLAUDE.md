@@ -47,6 +47,18 @@
   - **板上压缩**(PR #44,用户 10-10:PNG + JPEG q95/90/85/75/60 在板上做、运行时用 `B3` 选):bitbank2 JPEGENC / PNGenc(`fw_nrf5340/lib/`,JPEGENC 加了数值质量补丁),输出写 PSRAM 再发;`B4` 同一帧发 7 种格式(`host/codec_bench.py`)。默认仍是原始格式。**应用核默认 64 MHz**,`-Cflags CPU_128MHZ` 编码快一倍(是否默认待定)。
   - **双板最小流程**(用户 10-07 要求,PR #36):5340 控制命令 **0xB2 = 拍一张**(只在 `fw_nrf5340/`;HM0360 平时 S2 睡眠,请求时唤醒采第 1 帧发出再睡;坏帧最多重拍 2 次;一次开机只用 0xB1 或 0xB2 其中一种)。`host/stereo.py`:Windows 同时连两块板、空格(或鼠标左键)同时拍、S(或右键)保存、`--flash VGA` 先给两块板烧模式(窗口不拼接,拼接离线用 `stitch.py`;**同一时间只能开一个 stereo.py,中文输入法会吃掉空格**),同时拍靠主机同时下命令(方案 A),不追求性能。图像旋转(`BOARDS` 的 `rotate`,顺时针):左板 `hm0360-5340` **90°**(10-07 实拍确认),右板 `hm0360b-5340` **270°**(10-08 用户确认,90° 时上下颠倒);左 = `hm0360-5340`、右 = `hm0360b-5340`(还没按佩戴位置确认)。拼接两种都保留(`cv2.Stitcher` + 论文的 ORB 流程,`host/stitch.py`),后续比较。后续优化(桥、同步 C/C' + FSIN、曝光、PSRAM、片上 JPEG、Mac 测试)见笔记 `10.5~10.11/硬件流程+后续优化.md`。
 
+  - **对时方案 E + M2 命令**(hub INTERFACES C1 / C2 / D,Xiaomeng 11-21 同意;hub #39、#68,PR #?):
+    - **对时**:应用核 RTC0 = 蓝牙控制器的 µs 时钟;桥每 5 s 发 `0xB5`(锚点时间 + 连接事件计数),板子换算成**桥的时间**。
+      帧头 `capture_us` = FVLD 上升沿(RTC0 硬件捕获)在桥时间上的低 32 位,标志 `0x01`。
+      `0xB7 … <T>` 在桥时间 T 硬件唤醒(RTC0 比较 → DPPI → XSLEEP)。桥:`Q` 问时间、`T` 定时写,桥重启后时间从 0 开始。
+    - **环形缓存**:`0xB8 2 <P>` 在桥时间 P 的整数倍上硬件唤醒拍一张,按 `0xB3` 的格式存进 PSRAM 的环,不发。
+      PSRAM 前 7.5 MB 给环,后 512 KB 给直接发的图做编码输出;索引 512 帧;PNG 存原始。`0xB8 0` 停,帧保留到下次开始。
+    - **查状态、取帧**:`0xB9` 查状态;`0xBA 0/1/2/3` 按时间最近 / 不晚于 / 一段 / 帧号取帧。
+      回复包走数据特征,包标志 bit2:`R_STATUS`、`R_FRAME`、`R_NONE`、`R_DONE`。
+      取帧由比主线程低的发送线程做,取帧时照常拍。
+    - **断线**:断线仍然重启、环清空(Xiaomeng 11-21);`0xB8 0` 后可以 `0xB1`。
+    - 测试:`host/m2_test.py`(表见 DEVLOG 11-21)。
+
 ## 仓库结构
 
 - `fw/`:nRF5 SDK 17.1.0 裸机固件(Makefile,**不是** Zephyr / NCS)。DK 目标是 `banji_dev`(`-DBOARD_PCA10056 -DFF=0`);`banji` 是作者的自制板,不要在 DK 上烧。
@@ -101,7 +113,7 @@
 - 常用(在 `fw_nrf5340/` 下):`python3 tools/dk5340.py run [--board HM0360|HM0360B] [--mode QQVGA] [--color-bar] [--monitor] [--period-ms 0] [--cflags 'A=1;B'] [--pristine] [--seconds N]`;`build` / `flash` / `rtt` / `camera` 单独用。viewer:`--board hm0360-5340|hm0360b-5340`。
 - 设备(2026-10-07 起两块都接 HM0360):`HM0360` 板 J-Link SN `1050035314`、BLE `DA:E7:DE:69:E3:5E`;`HM0360B` 板 SN `1050017384`、BLE `EA:F1:6D:2A:C0:BB`(10-06 前接的是 HM01B0);芯片 nRF5340 **REV1**。RTT / JLink 器件名 `nRF5340_xxAA_APP`,nrfjprog `-f nrf53`。
 - 接线(和 52840 的差别):FVLD → **P1.09**、LVLD → **P1.10**、片选回环跳线 **P1.06 → P1.07**;其余(PCLK P1.02、D0 P1.03、MCLK P1.08、XSLEEP P1.04、RST P1.05、I2C P0.26 / P0.27)不变。引脚在 `src/pins.h`,I2C 在 `boards/nrf5340dk_nrf5340_cpuapp.overlay`。
-- 外设占用:TIMER0 = MCLK、TIMER1 = 数行、TIMER2 = CS 脉冲、EGU0 = FVLD 分发、DPPI 通道 16–24 / 组 3–5、SPIS2(寄存器级)、TWIM1、RTC0 = 压力测试。应用核只有 TIMER0–2、RTC0–1(RTC1 是内核时钟)。
+- 外设占用:TIMER0 = MCLK、TIMER1 = 数行、TIMER2 = CS 脉冲、EGU0 = FVLD 分发、DPPI 通道 16–24 / 组 3–5、SPIS2(寄存器级)、TWIM1、RTC0 = 对时(`timesync.c`;`CAPTURE_STRESS_US` 压力测试也用它,两者不能同时开)、DPPI 25 / 26 = 对时。应用核只有 TIMER0–2、RTC0–1(RTC1 是内核时钟)。
 - 坑:
   - **仓库路径有空格,Zephyr 设备树预处理会失败**:`dk5340.py` 在 Windows 用 `subst V:`(编译目录 `V:\fw_nrf5340\build_<变体>`),Mac 用符号链接 `~/.cache/vuebuds-src/<hash>`(已 gitignore)。Windows 目录联接(junction)不行,CMake 会解析回真实路径。
   - **sysbuild 下 `-DCAM_MODE=…` 传不到应用镜像**:要写 `-Dfw_nrf5340_CAM_MODE=…`,CMakeLists 里用 `zephyr_get(... SYSBUILD LOCAL)` 读(`dk5340.py` 已处理)。新加 `.conf` / overlay 文件后要 `--pristine`,否则不生效(网络核配置因此没生效过,一帧要传 12 s)。
