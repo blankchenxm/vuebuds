@@ -22,10 +22,6 @@
 
 /* Right after a good frame, while the sensor is still awake: header fields and exposure. */
 void imagePrepare(const camera_frame_t *frame);
-/* The two halves of imagePrepare: the capture time (read the FVLD capture before the next edge),
- * then the exposure registers (I2C, sensor awake). */
-void imagePrepareTime(const camera_frame_t *frame);
-void imagePrepareExposure(void);
 /* Sends the prepared frame in the current format; false if it was not sent. */
 bool imageSend(const camera_frame_t *frame);
 void imageAddFlags(uint8_t flags);  // BLE_HEADER_*, between imagePrepare() and imageSend()

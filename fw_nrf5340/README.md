@@ -57,6 +57,9 @@ streaming to `host/viewer.py`, or Monitor (frames cached in RAM, HM0360 S2 sleep
   thread, so the ring keeps capturing (`R_STATUS` counts skipped capture times). 0xB2 while the
   ring runs is stored too and sent with `R_FRAME`. `B8 00` then `B1` hands the sensor to the stream.
   `host/m2_test.py` tests all of it (hub #68).
+  VGA (hub #68 item 2): at 64 MHz the ring keeps up at 1.5 s; `-Cflags CPU_128MHZ` 1.0 s;
+  `RING_EARLY_ARM` (encode while the next wake runs) with 128 MHz 0.8 s (`host/ring_period_test.py`).
+  `CAMERA_REG_DUMP` prints the sensor's ID / revision / AE registers at camera start (`host/ae_check.py`).
 
 ## Encoders and PSRAM (2026-10-11)
 

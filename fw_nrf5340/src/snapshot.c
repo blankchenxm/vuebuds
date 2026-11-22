@@ -52,6 +52,7 @@ static bool m_ring_due_pending;    // fixed exposure: waiting for the due timer
 
 static void request(picture_kind_t kind);
 static void ringSchedule(void);
+static bool m_ring_defer_arm;  // RING_EARLY_ARM: ringSchedule() leaves the slot to the caller
 
 static uint64_t bridgeNowUs(void)
 {
@@ -182,21 +183,10 @@ void snapshotFrameDone(void)
   bool sleep = m_s2 && !cameraExposureManual();
   // Capture ends ~13 ms (VGA ~28 ms) before the frame boundary, where DPPI pulls XSLEEP low.
   if (ok) {
-#ifdef SNAP_SLEEP_FIRST
-    // Experiment (hub #68 item 2): every picture's sleep ran into the 16 ms timeout (no FVLD fall)
-    // while Monitor's, armed right at the end of the capture, mostly did not. Here the sleep is
-    // armed before the exposure registers are read over I2C.
-    imagePrepareTime(&frame);
-    if (sleep) {
-      cameraSleepOnFrameBoundary();
-    }
-    imagePrepareExposure();
-#else
     imagePrepare(&frame);  // exposure over I2C: before S2, which turns I2C off (~3 ms of the 13)
     if (sleep) {
       cameraSleepOnFrameBoundary();
     }
-#endif
     if (m_kind == PIC_TIMED) {
       imageAddFlags(BLE_HEADER_TIMED | (m_skipped ? BLE_HEADER_SKIPPED : 0));
       m_skipped = false;
@@ -211,22 +201,28 @@ void snapshotFrameDone(void)
   }
 #ifdef RING_EARLY_ARM
   if (kind == PIC_RING && ok && sleep && m_ring_period_ms) {
-    // Experiment (hub #68 item 2, VGA): wait for the boundary here and arm the next wake before
-    // encoding, so the encode overlaps the next wake's ~0.3 s to its first FVLD. The slot is
-    // overwritten from that FVLD on: if it came before the frame was stored, the entry is dropped.
+    // Build option (hub #68 item 2, VGA): wait for the boundary here (<= the sleep timeout) and set
+    // up the next wake before encoding, so the encode overlaps the next wake's 0.2-0.3 s to its
+    // first FVLD. The slot is armed (which clears it) only after the store; if that first FVLD
+    // came earlier, the next frame is captured instead (logged).
     uint32_t wait_us;
     bool boundary = cameraWaitAsleep(&wait_us);
     m_busy = false;
     m_retakes = 0;
     uint64_t fvld0 = timesyncLastFvldUs();
+    // Arming the slot clears it (capture.c), so only the wake is set up now; armed after the store.
+    m_ring_defer_arm = true;
     ringSchedule();
+    m_ring_defer_arm = false;
     bool send = m_ring_send;
     m_ring_send = false;
     bool stored = ringcmdStore(&frame, send);
-    if (stored && timesyncLastFvldUs() != fvld0) {
-      ringDropNewest();
-      stored = false;
-      NRF_LOG_RAW_INFO("%08d [ring] next frame started before this one was stored: dropped\n", systemTimeGetMs());
+    bool late = timesyncLastFvldUs() != fvld0;  // the next wake's first frame has begun
+    if (m_busy && m_kind == PIC_RING) {
+      cameraArmSlot(SNAPSHOT_SLOT, 0);  // late: the next frame after this one is captured instead
+    }
+    if (late) {
+      NRF_LOG_RAW_INFO("%08d [ring] next wake's first frame began before the slot was armed\n", systemTimeGetMs());
     }
     if (!stored) {
       m_ring_skips++;
@@ -474,7 +470,9 @@ static void ringSchedule(void)
   m_request_ms = systemTimeGetMs() + (uint32_t)((local - now_l) / 1000);
   m_busy = true;
   if (m_s2 && !cameraExposureManual()) {
-    cameraArmSlot(SNAPSHOT_SLOT, 0);
+    if (!m_ring_defer_arm) {
+      cameraArmSlot(SNAPSHOT_SLOT, 0);
+    }
     if (!cameraWakeAt(local)) {
       NRF_LOG_RAW_INFO("%08d [ring] hardware wake failed, waking now\n", systemTimeGetMs());
       cameraWake();
