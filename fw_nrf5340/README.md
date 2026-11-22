@@ -137,7 +137,7 @@ Same firmware, chosen at build time: `--board V3L` / `V3R` builds with `CAM_BOAR
 - `src/pmic.c`: MAX77650 at 0x48; first thing in `main()` SBB2 (camera AVDD) 3.3 V → 2.8 V
   (as `fw_v3_test`), then the PMIC status and rails are logged (`[pmic] …`).
 - No camera module: the boot probe (`cameraProbe()`) logs `[camera] no camera`; `0xB2` takes
-  nothing, `0xB8 1` / `0xB8 2` stop at once, so `R_STATUS` says state 0 (all boards since PR #?).
+  nothing, `0xB8 1` / `0xB8 2` stop at once, so `R_STATUS` says state 0 (all boards since PR #64).
 - Flash / log through the external J-Link: `--snr <serial>`, or the serial saved by
   `host/v3_bringup.py b0` in `host/v3_boards.local.json`; RTT and J-Link Commander at 1 MHz.
 
