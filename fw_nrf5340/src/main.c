@@ -18,6 +18,8 @@
 #include "snapshot.h"
 #include "ble.h"
 #include "image.h"
+#include "timesync.h"
+#include "ringcmd.h"
 #include "i2c.h"
 #include "psram.h"
 #include "timers.h"
@@ -46,8 +48,9 @@ static void processEvent(event_t event)
       NRF_LOG_RAW_INFO("%08d [main] Monitor build: BLE streaming is disabled\n", systemTimeGetMs());
       break;
 #endif
-      if (snapshotActive()) {
-        NRF_LOG_RAW_INFO("%08d [main] taking single pictures (0xB2): stream start ignored\n", systemTimeGetMs());
+      if (snapshotActive() && !snapshotHandOver()) {
+        // 0xB1 after 0xB2 / 0xB8 only once those are stopped (0xB8 0) and idle (INTERFACES C2).
+        NRF_LOG_RAW_INFO("%08d [main] taking pictures (0xB2 / 0xB8): stream start ignored\n", systemTimeGetMs());
         break;
       }
       streaming = true;
@@ -115,18 +118,41 @@ static void processEvent(event_t event)
     case EVENT_CAMERA_TIMED:
       snapshotTimedTick();
       break;
+
+    case EVENT_CAMERA_RING_DUE:
+      snapshotRingDue();
+      break;
 #endif
 
     case EVENT_BLE_COMMAND: {
       ble_command_t cmd;
       while (bleNextCommand(&cmd)) {
+        if (cmd.data[0] == TIMESYNC_CMD_REFERENCE || cmd.data[0] == TIMESYNC_CMD_SNAPSHOT_AT) {
+          uint64_t at;
+          bool timed = timesyncCommand(&cmd, &at);
+          (void)timed;  // Monitor builds take no pictures
+#ifndef CAMERA_APP_MONITOR
+          if (cmd.data[0] == TIMESYNC_CMD_SNAPSHOT_AT && !streaming) {
+            if (timed) {
+              snapshotRequestAt(at);
+            } else {
+              snapshotRequest();  // no time reference yet: now, like 0xB2
+            }
+          }
+#endif
+          continue;
+        }
 #ifndef CAMERA_APP_MONITOR
         if (cmd.data[0] == SNAPSHOT_CMD_TIMED) {
           if (streaming) {
-            NRF_LOG_RAW_INFO("%08d [main] streaming (0xB1): timed capture ignored\n", systemTimeGetMs());
+            NRF_LOG_RAW_INFO("%08d [main] streaming (0xB1): timed capture / ring ignored\n", systemTimeGetMs());
           } else {
-            snapshotTimedCommand(cmd.data, cmd.len);
+            ringcmdCommand(&cmd);  // 0xB8 0 / 1 / 2 (snapshot.h, ringcmd.h)
           }
+          continue;
+        }
+        if (cmd.data[0] == RINGCMD_STATUS || cmd.data[0] == RINGCMD_FETCH) {
+          ringcmdCommand(&cmd);  // also after a hand-over to the stream: the frames stay
           continue;
         }
 #endif
@@ -144,6 +170,9 @@ static void processEvent(event_t event)
 
     case EVENT_PSRAM_CHECK:
       psramCheckFinish();
+#ifndef CAMERA_APP_MONITOR
+      ringcmdInit();
+#endif
       break;
 
     default:
@@ -181,6 +210,8 @@ int main(void)
   psramCheckStart();
   if (psramState() == PSRAM_STATE_WAITING) {
     k_timer_start(&psramCheckTimer, K_MSEC(PSRAM_CHECK_WAIT_MS), K_NO_WAIT);
+  } else {
+    eventQueuePush(EVENT_PSRAM_CHECK);  // failed at once: set up the ring (in RAM) now
   }
   bleInit();
   NRF_LOG_RAW_INFO("%08d [mustard] booted\n", systemTimeGetMs());

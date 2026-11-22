@@ -17,6 +17,7 @@
 #define BLE_HEADER_COMMON_CLOCK    0x01  // capture_us is on the bridge's common clock (time sync)
 #define BLE_HEADER_MANUAL_EXPOSURE 0x02
 #define BLE_HEADER_SKIPPED         0x04  // 0xB8: at least one period was skipped before this picture
+#define BLE_HEADER_FROM_RING       0x08  // M2: sent out of the ring buffer (after an R_FRAME reply)
 #define BLE_HEADER_TIMED           0x10  // 0xB8: taken by the timed capture (not a 0xB2 request)
 
 typedef struct __packed {
@@ -37,7 +38,7 @@ typedef struct __packed {
 typedef size_t (*ble_reader_t)(void *ctx, uint32_t offset, uint8_t *dst, size_t n);
 
 /* Multi-byte control commands (0xB3 ...), queued for the main thread (EVENT_BLE_COMMAND). */
-#define BLE_COMMAND_MAX 16
+#define BLE_COMMAND_MAX 24  // 0xB7: 1 + 8 + 2 + 8 bytes
 typedef struct {
   uint8_t len;
   uint8_t data[BLE_COMMAND_MAX];
@@ -47,5 +48,10 @@ void bleInit(void);  // starts advertising
 // Sends header + header->length bytes from read() and returns when every packet is queued.
 bool bleSendImage(const ble_frame_header_t *header, ble_reader_t read, void *ctx);
 bool bleNextCommand(ble_command_t *cmd);  // false when the queue is empty
+/* M2 reply packet [seq, flags 0x04, type, data...] (ringcmd.h); sent between frames. */
+bool bleSendReply(uint8_t type, const void *data, uint16_t len);
+/* Hold the data channel across several sends (an R_FRAME reply and its frame); recursive. */
+void bleLock(void);
+void bleUnlock(void);
 
 #endif

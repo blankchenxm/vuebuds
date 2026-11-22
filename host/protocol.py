@@ -10,6 +10,8 @@ data    char 0x1402: notifications of [seq, flags, payload...]
                      (format 0 raw gray, 1 PNG, 2 JPEG)
 control 0x1403: 0xB3 <format> <quality> image format; 0xB4 codec bench; 0xB6 00 auto exposure,
                 0xB6 01 <integration u16> <analog gain u8> <digital gain u16> fixed exposure
+M2 (hub INTERFACES C2, fw_nrf5340/src/ringcmd.h): 0xB8 2 / 0 ring buffer, 0xB9 status, 0xBA fetch;
+                replies are data notifications with flags bit2: [seq, 0x04, type, ...] (Reply below)
 """
 import json
 import pathlib
@@ -68,7 +70,11 @@ CMD_SNAPSHOT = 0xB2
 CMD_SET_FORMAT = 0xB3
 CMD_CODEC_BENCH = 0xB4  # next picture sent raw, PNG, JPEG q95 / 90 / 85 / 75 / 60 (same frame id)
 CMD_SET_EXPOSURE = 0xB6
+CMD_TIME_REFERENCE = 0xB5   # from the bridge only (fw_nrf5340/src/timesync.h)
+CMD_SNAPSHOT_AT = 0xB7      # picture at a bridge time T (bridge.Bridge.timed_write)
 CMD_TIMED = 0xB8  # timed capture: <mode u8> <period u16 ms>; mode 1 start, 0 stop (INTERFACES C2, F5)
+CMD_STATUS = 0xB9  # M2: -> R_STATUS
+CMD_FETCH = 0xBA   # M2: 0 nearest / 1 at or before <t u64>, 2 range <t1> <t2> <n u8>, 3 frame number <u32>
 FORMAT_RAW, FORMAT_PNG, FORMAT_JPEG = 0, 1, 2
 FORMAT_NAMES = {FORMAT_RAW: "raw", FORMAT_PNG: "png", FORMAT_JPEG: "jpeg"}
 
@@ -84,6 +90,33 @@ def timed_command(period_ms: int) -> bytes:
     return bytes([CMD_TIMED, 1]) + struct.pack("<H", period_ms)
 
 
+def ring_command(period_ms: int) -> bytes:
+    """0xB8 2: ring buffer, a picture at every multiple of period_ms on the bridge's clock; 0: 0xB8 0 (stop)."""
+    if period_ms == 0:
+        return bytes([CMD_TIMED, 0])
+    return bytes([CMD_TIMED, 2]) + struct.pack("<H", period_ms)
+
+
+def status_command() -> bytes:
+    return bytes([CMD_STATUS])
+
+
+def fetch_nearest_command(t_us: int) -> bytes:
+    return bytes([CMD_FETCH, 0]) + struct.pack("<Q", t_us)
+
+
+def fetch_before_command(t_us: int) -> bytes:
+    return bytes([CMD_FETCH, 1]) + struct.pack("<Q", t_us)
+
+
+def fetch_range_command(t1_us: int, t2_us: int, n: int) -> bytes:
+    return bytes([CMD_FETCH, 2]) + struct.pack("<QQB", t1_us, t2_us, n)
+
+
+def fetch_seq_command(seq: int) -> bytes:
+    return bytes([CMD_FETCH, 3]) + struct.pack("<I", seq)
+
+
 def set_exposure_command(integration: Optional[int] = None, analog_gain: int = 0, digital_gain: int = 0) -> bytes:
     """None: automatic exposure; else fixed register values (HM0360)."""
     if integration is None:
@@ -92,6 +125,15 @@ def set_exposure_command(integration: Optional[int] = None, analog_gain: int = 0
 
 FLAG_START_OF_FRAME = 0x01
 FLAG_HEADER_V2 = 0x02
+FLAG_REPLY = 0x04  # M2 reply packet, not part of a frame
+R_STATUS, R_FRAME, R_NONE, R_DONE, R_TIME = 1, 2, 3, 4, 5
+R_NONE_REASONS = {0: "overwritten", 1: "not taken yet", 2: "ring empty", 3: "busy", 4: "bad arguments",
+                  5: "not synced"}
+STATUS_FIELDS = ("state", "period", "format", "quality", "frames", "oldest_seq", "oldest_us", "newest_seq",
+                 "newest_us", "now_us", "used_kb", "total_kb", "skipped", "overwritten", "psram", "synced")
+STATUS = struct.Struct("<BHBBHIQIQQHHHIBB")
+R_FRAME_S = struct.Struct("<IQI")    # frame number, capture time, length
+R_NONE_S = struct.Struct("<BQQ")     # reason, oldest time, newest time
 FRAME_HEADER = struct.Struct("<HH")  # width, height (v1)
 # v2: width, height, format, quality, length, capture_us, frame_id, integration, analog gain,
 # digital gain, flags (fw_nrf5340/src/ble.h ble_frame_header_t)
@@ -99,6 +141,7 @@ HEADER_V2 = struct.Struct("<HHBBIIHHBHB")
 HEADER_COMMON_CLOCK = 0x01
 HEADER_MANUAL_EXPOSURE = 0x02
 HEADER_SKIPPED = 0x04  # 0xB8: at least one period skipped before this picture
+HEADER_FROM_RING = 0x08  # M2: sent out of the ring buffer (after R_FRAME)
 HEADER_TIMED = 0x10    # 0xB8: taken by the timed capture, not a 0xB2 request
 # Placeholder canvas size before the first frame header arrives.
 DEFAULT_SIZE = (320, 240)
@@ -132,6 +175,35 @@ class Frame:
                 "digital_gain": self.digital_gain, "manual": bool(self.header_flags & HEADER_MANUAL_EXPOSURE)}
 
 
+@dataclass
+class Reply:
+    """M2 reply packet. kind: R_*; fields: STATUS_FIELDS (R_STATUS), seq / capture_us / length
+    (R_FRAME), reason / oldest_us / newest_us (R_NONE), count (R_DONE)."""
+    kind: int
+    fields: dict
+    received_at: float
+
+
+def parse_reply(payload: bytes, now: float) -> Optional[Reply]:
+    if not payload:
+        return None
+    kind, body = payload[0], payload[1:]
+    try:
+        if kind == R_STATUS:
+            return Reply(kind, dict(zip(STATUS_FIELDS, STATUS.unpack_from(body))), now)
+        if kind == R_FRAME:
+            return Reply(kind, dict(zip(("seq", "capture_us", "length"), R_FRAME_S.unpack_from(body))), now)
+        if kind == R_NONE:
+            return Reply(kind, dict(zip(("reason", "oldest_us", "newest_us"), R_NONE_S.unpack_from(body))), now)
+        if kind == R_DONE:
+            return Reply(kind, {"count": body[0]}, now)
+        if kind == R_TIME:
+            return Reply(kind, dict(zip(("token", "board_us"), struct.unpack_from("<IQ", body))), now)
+    except (struct.error, IndexError):
+        return None
+    return Reply(kind, {"raw": bytes(body)}, now)
+
+
 def decode_image(data: bytes, width: int, height: int) -> bytes:
     """PNG / JPEG bytes -> 8-bit gray pixels (OpenCV)."""
     import cv2
@@ -149,9 +221,11 @@ class FrameAssembler:
     diagnostics (lost packets, discarded partial frames).
     """
 
-    def __init__(self, on_frame: Callable[[Frame], None], on_event: Callable[[str], None] = print):
+    def __init__(self, on_frame: Callable[[Frame], None], on_event: Callable[[str], None] = print,
+                 on_reply: Optional[Callable[[Reply], None]] = None):
         self.on_frame = on_frame
         self.on_event = on_event
+        self.on_reply = on_reply  # M2 reply packets (flags bit2); ignored if None
         self.frames = 0
         self.total_packets = 0
         self.total_lost = 0
@@ -181,6 +255,14 @@ class FrameAssembler:
                 self._lost += gap
                 self.on_event(f"seq gap: {self._last_seq} -> {seq} ({gap} packet(s) lost)")
         self._last_seq = seq
+
+        if flags & FLAG_REPLY:  # M2 reply: never part of a frame (may come between a frame's packets)
+            r = parse_reply(payload, now)
+            if r is None:
+                self.on_event(f"bad reply packet: {payload.hex()}")
+            elif self.on_reply:
+                self.on_reply(r)
+            return
 
         if flags & FLAG_START_OF_FRAME:
             if self._buf:

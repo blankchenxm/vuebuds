@@ -8,6 +8,8 @@
 #include "psram.h"
 #include "timers.h"
 #include "image.h"
+#include "timesync.h"
+#include "ring.h"
 
 #define PNG_LEVEL 6  // zlib default; the PC check (tools/codec_test) matched OpenCV's PNG size
 #define BENCH_FORMATS 7
@@ -17,6 +19,8 @@ static uint8_t m_quality;
 static uint16_t m_frame_id;
 static bool m_bench;  // 0xB4: the next frame goes out raw, PNG and JPEG q95 / 90 / 85 / 75 / 60
 static ble_frame_header_t m_header;
+static uint64_t m_capture_us;  // full capture time of the prepared frame
+static bool m_common_clock;
 
 /* Raw frames: the standard region, row by row out of the capture slot. */
 static size_t readRaw(void *ctx, uint32_t offset, uint8_t *dst, size_t n)
@@ -33,12 +37,14 @@ static size_t readRaw(void *ctx, uint32_t offset, uint8_t *dst, size_t n)
 }
 
 /*
- * Encoder output: random access (PNG seeks back), in PSRAM when the board has one, else in the
- * frame pool past slot 0 and the encoders' workspace (stream / picture builds use slot 0 only).
+ * Encoder output: random access (PNG seeks back), in the PSRAM past the ring (RING_BYTES) when
+ * the board has one, else in the frame pool past slot 0 and the encoders' workspace (stream /
+ * picture builds use slot 0 only; the ring then shares this RAM, see encode()).
  */
 typedef struct {
   codec_io_t io;
-  uint8_t *ram;   // NULL: PSRAM
+  uint8_t *ram;   // NULL: PSRAM at base
+  uint32_t base;
   int32_t cap, pos, size;
   bool failed;
 } sink_t;
@@ -49,7 +55,7 @@ static bool m_codec_ready;
 static int32_t sinkWrite(codec_io_t *io, const uint8_t *data, int32_t len)
 {
   sink_t *s = io->ctx;
-  if (s->pos + len > s->cap || (s->ram == NULL && !psramWrite(s->pos, data, len))) {
+  if (s->pos + len > s->cap || (s->ram == NULL && !psramWrite(s->base + s->pos, data, len))) {
     s->failed = true;
     return 0;
   }
@@ -65,7 +71,7 @@ static int32_t sinkRead(codec_io_t *io, uint8_t *data, int32_t len)
 {
   sink_t *s = io->ctx;
   len = MIN(len, s->size - s->pos);
-  if (len <= 0 || (s->ram == NULL && !psramRead(s->pos, data, len))) {
+  if (len <= 0 || (s->ram == NULL && !psramRead(s->base + s->pos, data, len))) {
     return 0;
   }
   if (s->ram != NULL) {
@@ -90,7 +96,10 @@ static size_t readEncoded(void *ctx, uint32_t offset, uint8_t *dst, size_t n)
   return (size_t)sinkRead(&s->io, dst, n);
 }
 
-static bool codecReady(void)
+static uint8_t *m_ram;  // frame pool past slot 0 and the workspace
+static uint32_t m_ram_bytes;
+
+bool imageCodecReady(void)
 {
   if (m_codec_ready) {
     return true;
@@ -105,11 +114,14 @@ static bool codecReady(void)
   m_sink.io = (codec_io_t){sinkWrite, sinkRead, sinkSeek, &m_sink};
   if (psramCheckFinish()) {  // boot check (psram.h); waits if the picture comes within 2 s of boot
     m_sink.ram = NULL;
-    m_sink.cap = PSRAM_SIZE;
+    m_sink.base = RING_BYTES;
+    m_sink.cap = PSRAM_SIZE - RING_BYTES;
   } else {
     m_sink.ram = mem + ((ws + 3) & ~3u);
     m_sink.cap = spare - ((ws + 3) & ~3u);
   }
+  m_ram = mem + ((ws + 3) & ~3u);
+  m_ram_bytes = spare - ((ws + 3) & ~3u);
   NRF_LOG_RAW_INFO("[img] encoders ready: workspace %u B, output in %s (%u KB)\n", (unsigned)ws,
                    m_sink.ram ? "RAM" : "PSRAM", m_sink.cap / 1024);
   m_codec_ready = true;
@@ -119,8 +131,13 @@ static bool codecReady(void)
 /* Encode into the sink; returns the size, or <= 0 (then the frame goes out raw). */
 static int32_t encode(const camera_frame_t *frame, uint8_t format, uint8_t quality, uint32_t *us)
 {
-  if (!codecReady()) {
+  if (!imageCodecReady()) {
     return -1;
+  }
+  if (m_sink.ram != NULL && ringCount() > 0 && !ringInPsram()) {
+    // No PSRAM: the ring lives in this RAM too (ringcmd.c), and this picture overwrites it.
+    NRF_LOG_RAW_INFO("%08d [img] no PSRAM: the ring shares the encoder output RAM, emptied\n", systemTimeGetMs());
+    ringReset();
   }
   m_sink.pos = m_sink.size = 0;
   m_sink.failed = false;
@@ -175,7 +192,17 @@ void imagePrepare(const camera_frame_t *frame)
   memset(&m_header, 0, sizeof(m_header));
   m_header.width = frame->width;
   m_header.height = frame->height;
-  m_header.capture_us = stats->start_us;
+  // FVLD rise: hardware time (RTC0 capture), on the bridge's clock once it sent a reference.
+  uint64_t bridge_us;
+  m_common_clock = timesyncLocalToBridge(timesyncLastFvldUs(), &bridge_us);
+  if (m_common_clock) {
+    m_header.capture_us = (uint32_t)bridge_us;
+    m_header.flags |= BLE_HEADER_COMMON_CLOCK;
+    m_capture_us = bridge_us;
+  } else {
+    m_header.capture_us = stats->start_us;
+    m_capture_us = stats->start_us;
+  }
   camera_exposure_t e;
   if (cameraReadExposure(&e)) {
     m_header.integration = e.integration;
@@ -185,6 +212,33 @@ void imagePrepare(const camera_frame_t *frame)
   if (cameraExposureManual()) {
     m_header.flags |= BLE_HEADER_MANUAL_EXPOSURE;
   }
+}
+
+uint8_t *imageRam(uint32_t *bytes)
+{
+  if (!imageCodecReady()) {
+    *bytes = 0;
+    return NULL;
+  }
+  *bytes = m_ram_bytes;
+  return m_ram;
+}
+
+void imageFormat(uint8_t *format, uint8_t *quality)
+{
+  *format = m_format;
+  *quality = m_quality;
+}
+
+bool imageCaptureTime(uint64_t *us)
+{
+  *us = m_capture_us;
+  return m_common_clock;
+}
+
+const ble_frame_header_t *imageHeader(void)
+{
+  return &m_header;
 }
 
 void imageAddFlags(uint8_t flags)

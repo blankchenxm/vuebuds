@@ -30,7 +30,7 @@ streaming to `host/viewer.py`, or Monitor (frames cached in RAM, HM0360 S2 sleep
 - `src/snapshot.c` (not in `fw/`): control command **0xB2 takes one picture** in stream builds.
   HM0360 sleeps (S2) between pictures; a request wakes it, the first frame is sent with the
   usual frame packets, then it sleeps again. A bad frame is retaken (up to 2 times). One boot
-  takes either 0xB1 (stream) or 0xB2 (pictures). Used by `host/stereo.py` (two boards;
+  takes either 0xB1 (stream) or 0xB2 (pictures); 0xB1 after `B8 00` is allowed (M2). Used by `host/stereo.py` (two boards;
   `--exposure auto | fixed I A D | sync`).
   **0xB8 timed capture** (F5, hub INTERFACES C2, 2026-11-19): `B8 01 <period u16 ms>` takes a
   picture every period (100–60000 ms, 32.768 kHz clock), the first right away, like 0xB2 and in
@@ -41,6 +41,22 @@ streaming to `host/viewer.py`, or Monitor (frames cached in RAM, HM0360 S2 sleep
   `host/timed_capture.py` measures the reached period. Without PSRAM (or when its boot check
   fails) the encoder output lives in the RAM left after the frame slot: ~45 KB with VGA, so VGA
   JPEG q85 does not fit and goes out raw (q60 fits).
+  **Time sync** (plan E, `src/timesync.c`, hub INTERFACES D): RTC0 counts the BLE controller's
+  µs; the bridge's `0xB5` references (anchor time + connection event counter) map it to the
+  bridge's clock. FVLD edges are captured in hardware (RTC0 CAPTURE2): frame headers carry the FVLD
+  rise on the bridge's clock (flag `0x01`, low 32 bits). `0xB7 … <T u64>` wakes the sensor at T in
+  hardware (RTC0 COMPARE0 → DPPI → XSLEEP). Uses RTC0, so not with `CAPTURE_STRESS_US`.
+  **M2: ring buffer, status, fetch** (`src/ringcmd.c`, `src/ring.c`; hub INTERFACES C2,
+  Xiaomeng 11-21): `B8 02 <P u16>` takes a picture at every multiple of P on the bridge's clock
+  (hardware wake), stores it in the 0xB3 format (PNG: raw) in the PSRAM ring (first 7.5 MB,
+  index 512 frames; without PSRAM in the RAM after the encoders) and does not send it; `B8 00`
+  stops (frames stay until the next start); `B9` status; `BA 00 / 01 / 02 / 03` fetch the frame
+  nearest to t / at or before t / in [t1, t2] (≤ 32) / by number. Replies are data notifications
+  `[seq, 0x04, type, …]`: `R_STATUS`, `R_FRAME` (before each frame sent from the ring, header flag
+  `0x08`), `R_NONE <reason>`, `R_DONE`. Fetched frames go out from a sender thread below the main
+  thread, so the ring keeps capturing (`R_STATUS` counts skipped capture times). 0xB2 while the
+  ring runs is stored too and sent with `R_FRAME`. `B8 00` then `B1` hands the sensor to the stream.
+  `host/m2_test.py` tests all of it (hub #68).
 
 ## Encoders and PSRAM (2026-10-11)
 

@@ -25,6 +25,13 @@ void imagePrepare(const camera_frame_t *frame);
 /* Sends the prepared frame in the current format; false if it was not sent. */
 bool imageSend(const camera_frame_t *frame);
 void imageAddFlags(uint8_t flags);  // BLE_HEADER_*, between imagePrepare() and imageSend()
+const ble_frame_header_t *imageHeader(void);  // as prepared (frame_id / format / length set by imageSend)
+/* 64-bit capture time of the prepared frame; true if on the bridge's clock. */
+bool imageCaptureTime(uint64_t *us);
+void imageFormat(uint8_t *format, uint8_t *quality);  // the 0xB3 setting
+bool imageCodecReady(void);  // encoders' workspace set up (first call)
+/* Frame pool RAM past slot 0 and the encoders' workspace (the ring's store without a PSRAM). */
+uint8_t *imageRam(uint32_t *bytes);
 void imageCommand(const ble_command_t *cmd);
 
 #endif

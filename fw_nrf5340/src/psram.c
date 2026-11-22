@@ -281,14 +281,24 @@ static bool access(bool write, uint32_t address, uint8_t *p, size_t len)
   return true;
 }
 
+// The ring sender thread (ringcmd.c) reads while the main thread writes: one access at a time
+// (the bounce buffer and the QSPI are shared).
+K_MUTEX_DEFINE(psramLock);
+
 bool psramWrite(uint32_t address, const void *data, size_t len)
 {
-  return access(true, address, (uint8_t *)data, len);
+  k_mutex_lock(&psramLock, K_FOREVER);
+  bool ok = access(true, address, (uint8_t *)data, len);
+  k_mutex_unlock(&psramLock);
+  return ok;
 }
 
 bool psramRead(uint32_t address, void *data, size_t len)
 {
-  return access(false, address, data, len);
+  k_mutex_lock(&psramLock, K_FOREVER);
+  bool ok = access(false, address, data, len);
+  k_mutex_unlock(&psramLock);
+  return ok;
 }
 
 /* ---------------- boot check ---------------- */

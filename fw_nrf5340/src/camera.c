@@ -17,6 +17,7 @@
 #include "pins.h"
 #include "timers.h"
 #include "i2c.h"
+#include "timesync.h"
 
 // Mode and test pattern are compile-time choices (no runtime switching).
 #ifndef CAMERA_MODE
@@ -180,6 +181,7 @@ void cameraSensorStream(void)
 // HM0360 S2: MCLK runs whenever XSLEEP is high (datasheet: MCLK first, then XSLEEP).
 static enum { CAMERA_AWAKE, CAMERA_FALLING_ASLEEP, CAMERA_ASLEEP } sleepState = CAMERA_AWAKE;
 static uint32_t sleepTimeoutMs;
+static uint64_t wakeAtUs;  // cameraWakeAt() armed for this local time (0: none)
 
 // No frame boundary in time (seen on the first wake after the stream starts, when FVLD
 // stays high from one frame to the next): sleep anyway, like PR #26's 30 ms timeout.
@@ -284,6 +286,7 @@ void cameraReapplyExposure(void)
 void cameraWake(void)
 {
   k_timer_stop(&sleepTimeoutTimer);
+  wakeAtUs = 0;
   capture_mclk_enable(true);
   nrf_delay_us(CAMERA_XSLEEP_SETTLE_US);
   capture_xsleep(true);
@@ -294,12 +297,42 @@ void cameraWake(void)
   }
 }
 
+bool cameraWakeAt(uint64_t local_us)
+{
+  if (sleepState != CAMERA_ASLEEP || !timesyncWakeAt(local_us)) {
+    return false;
+  }
+  // MCLK starts 2 ms before local_us (kernel timer), DPPI sets XSLEEP at local_us. Fixed
+  // exposure keeps the sensor awake, so nothing is pending here.
+  sleepState = CAMERA_AWAKE;
+  wakeAtUs = local_us;
+  return true;
+}
+
+// Before the MCLK timer (2 ms ahead) with some margin, nothing has happened yet.
+#define CAMERA_CANCEL_MARGIN_US 3000
+
+bool cameraCancelWakeAt(void)
+{
+  if (wakeAtUs == 0 || sleepState != CAMERA_AWAKE || timesyncLocalUs() + CAMERA_CANCEL_MARGIN_US > wakeAtUs) {
+    return false;
+  }
+  timesyncCancelWake();
+  if (capture_mclk_running()) {  // the timer fired after all (should not happen with the margin)
+    capture_mclk_enable(false);
+  }
+  sleepState = CAMERA_ASLEEP;
+  wakeAtUs = 0;
+  return true;
+}
+
 void cameraSleepOnFrameBoundary(void)
 {
   // XSLEEP low inside the 65 us FVLD-low gap: low anywhere inside a frame makes the next
   // wake one frame slower (QVGA 131 -> 235 ms to the first FVLD). DPPI pulls it low on the
   // FVLD fall; cameraAsleep() then stops MCLK.
   sleepState = CAMERA_FALLING_ASLEEP;
+  wakeAtUs = 0;
   sleepTimeoutMs = capture_xsleep_on_frame_boundary() ? CAMERA_SLEEP_AFTER_FRAME_TIMEOUT_MS
                                                       : CAMERA_SLEEP_ANYTIME_TIMEOUT_MS;
   k_timer_start(&sleepTimeoutTimer, K_MSEC(sleepTimeoutMs), K_NO_WAIT);
