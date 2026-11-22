@@ -28,6 +28,9 @@ bool cameraWakeAt(uint64_t local_us);      // the same at a timesync local time 
 bool cameraCancelWakeAt(void);             // undo cameraWakeAt() if it is still > 3 ms away (sensor asleep again)
 void cameraSleepOnFrameBoundary(void);     // S2 on: XSLEEP low on the next FVLD fall (PPI) ...
 void cameraAsleep(void);                   // ... EVENT_CAMERA_ASLEEP: then MCLK off
+/* After cameraSleepOnFrameBoundary(): wait here for the boundary (or the timeout), then cameraAsleep().
+ * true: on the boundary. The EVENT_CAMERA_ASLEEP that follows does nothing. */
+bool cameraWaitAsleep(uint32_t *waited_us);
 bool cameraIsAsleep(void);                 // XSLEEP low and MCLK off
 void cameraArmSlot(uint32_t slot, uint8_t skipFrames);
 bool cameraSlotFrame(uint32_t slot, camera_frame_t *frame);

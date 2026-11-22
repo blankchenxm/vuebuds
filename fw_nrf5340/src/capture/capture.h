@@ -73,6 +73,7 @@ uint8_t *capture_frame(void);
 /* XSLEEP now, or low on the next FVLD fall (frame boundary) -> EVENT_CAMERA_ASLEEP. */
 void capture_xsleep(bool high);
 bool capture_xsleep_on_frame_boundary(void);  // true: right after a last line, boundary ~13 ms away
+uint32_t capture_asleep_count(void);  // frame-boundary sleeps so far (+1 while the fired one is not handled yet)
 bool capture_mclk_running(void);
 const capture_stats_t *capture_stats(void);
 

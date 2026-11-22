@@ -91,6 +91,7 @@ static volatile uint16_t m_next_boundary;
 static volatile bool m_sleep_wanted;       // XSLEEP low wanted on the next FVLD fall
 static volatile bool m_sleep_armed;        // ... and the DPPI channel for it is enabled
 static volatile bool m_after_last_line;    // a frame's last line has passed, FVLD not yet changed
+static volatile uint32_t m_asleep_count;   // XSLEEP pulled low on a frame boundary (DPPI)
 static capture_stats_t m_stats;
 
 void *capture_gpiote(void)
@@ -257,6 +258,7 @@ static void frame_valid_handler(nrfx_gpiote_pin_t pin, nrfx_gpiote_trigger_t tri
     // The sleep channel has fired on the FVLD fall (it disables itself): XSLEEP is low.
     m_sleep_armed = false;
     m_sleep_wanted = false;
+    m_asleep_count++;
     eventQueuePush(EVENT_CAMERA_ASLEEP);
     return;
   }
@@ -540,6 +542,12 @@ void capture_xsleep(bool high)
   } else {
     nrfx_gpiote_clr_task_trigger(m_gpiote, CAM_XSLEEP);
   }
+}
+
+uint32_t capture_asleep_count(void)
+{
+  // The DPPI channel disables itself when it fires; the FVLD interrupt may not have run yet.
+  return m_asleep_count + (m_sleep_armed && !(NRF_DPPIC->CHEN & BIT(CAPTURE_DPPI_SLEEP)) ? 1 : 0);
 }
 
 bool capture_xsleep_on_frame_boundary(void)
