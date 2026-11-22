@@ -198,12 +198,17 @@ def jlink_commands(snr, device, commands, timeout=30):
         f.write("\n".join(["exec DisableAutoUpdateFW", "connect"] + list(commands) + ["exit"]) + "\n")
         script = f.name
     try:
-        r = subprocess.run([jlink_tool("JLink"), "-USB", str(snr), "-device", device, "-if", "SWD", "-speed", "4000",
+        r = subprocess.run([jlink_tool("JLink"), "-USB", str(snr), "-device", device, "-if", "SWD",
+                            "-speed", str(SWD_KHZ.get(str(snr), 4000)),
                             "-autoconnect", "0", "-NoGui", "1", "-CommandFile", script],
                            capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
         return r.stdout
     finally:
         os.unlink(script)
+
+
+# SWD clock per J-Link serial number where 4 MHz is too fast (filled by host/protocol.py for V3).
+SWD_KHZ = {}
 
 
 class RttLogger:
@@ -218,7 +223,9 @@ class RttLogger:
 
     HEADER = (b"SEGGER J-Link", b"Process: ")  # the telnet server's banner lines
 
-    def __init__(self, snr, device, out_file, speed=4000):
+    def __init__(self, snr, device, out_file, speed=None):
+        if speed is None:  # per probe (V3 boards: 1 MHz over the debug FPC, host/protocol.py)
+            speed = SWD_KHZ.get(str(snr), 4000)
         import socket
         import tempfile
         import threading
@@ -298,7 +305,7 @@ class RttLogger:
         return self.out_file.read_text("utf-8", "replace") if self.out_file.exists() else ""
 
 
-def capture_rtt(snr, device, out_file, seconds, label="", speed=4000):
+def capture_rtt(snr, device, out_file, seconds, label="", speed=None):
     """Attach the RTT logger for seconds, then print the log (as dk5340.ps1 rtt did)."""
     logger = RttLogger(snr, device, out_file, speed)
     try:

@@ -47,3 +47,12 @@ uint8_t i2cRead16(uint8_t addr, uint16_t reg)
   }
   return rx;
 }
+
+#ifdef BOARD_V3  // camera probe at boot (camera.c)
+int i2cTryRead16(uint8_t addr, uint16_t reg, uint8_t *val)
+{
+  uint8_t bytes[2] = {(reg >> 8) & 0xFF, reg & 0xFF};
+  int err = i2c_write(i2cDev, bytes, sizeof(bytes), addr);
+  return err ? err : i2c_read(i2cDev, val, 1, addr);
+}
+#endif

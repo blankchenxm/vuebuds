@@ -170,6 +170,35 @@ bool cameraGetFrame(camera_frame_t *frame)
   return true;
 }
 
+#ifdef BOARD_V3
+/*
+ * V3 boot (hub #83): is a camera module plugged in? MCLK on, reset pulse, read the model ID and
+ * revision quietly, then MCLK off and XSHUTDOWN low again (the module's reset state, 10 k
+ * pull-down on the board), so cameraInit() later starts from the same state as on the DK.
+ */
+uint16_t cameraProbe(void)
+{
+  capture_mclk_init();
+  delayMs(CAMERA_POR_DELAY_MS);
+  cameraHardwareReset();
+  uint8_t id[4] = {0};
+  int err = 0;
+  for (int i = 0; i < 4 && !err; i++) {
+    err = i2cTryRead16(CAMERA_I2C_ADDR, (uint16_t)i, &id[i]);
+  }
+  capture_mclk_enable(false);
+  nrf_gpio_pin_clear(CAM_XSHUTDOWN);
+  uint16_t model = ((uint16_t)id[0] << 8) | id[1];
+  if (err) {
+    NRF_LOG_RAW_INFO("[camera] no camera: nothing answers at 0x%02x (%d); pictures and the ring stay off\n",
+                     CAMERA_I2C_ADDR, err);
+    return 0;
+  }
+  NRF_LOG_RAW_INFO("[camera] found model 0x%04x, silicon revision 0x%02x (0x0003: 0x%02x)\n", model, id[2], id[3]);
+  return model;
+}
+#endif
+
 uint16_t cameraModelId(void)
 {
   return (cameraInitialized && sensor != NULL) ? sensor->model_id : 0;

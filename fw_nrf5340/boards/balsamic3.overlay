@@ -1,0 +1,21 @@
+/*
+ * balsamic3 (V3 board, hub #83): added on top of nrf5340dk_nrf5340_cpuapp.overlay by
+ * tools/dk5340.py --board V3L / V3R (-Dfw_nrf5340_EXTRA_DTC_OVERLAY_FILE). Pins are the same as
+ * on the DK (kicad-agent-flow boards/balsamic3/board.yaml, hub INTERFACES G): camera, I2C on
+ * P0.26 / P0.27 (PMIC MAX77650 at 0x48, camera at 0x24) and the PSRAM on the QSPI pins. Only the
+ * ISP2053 module differs, as in fw_v3_test/boards (verified on V3 2026-10):
+ * - 32.768 kHz crystal: load capacitors are inside the module; ISP2053 DS R11 p.8 says
+ *   XOSC32KI.INTCAP must select "External" (the DK uses internal 7 pF).
+ * - Supply: VDD and VDDH tied to +1V8 (normal mode, DCCH open), so the VDDH regulator is unused;
+ *   the module integrates the DC/DC inductors.
+ * No buttons or LEDs are used (the firmware never used the DK's either). FSIN is not connected
+ * on V3 (P1.11 free); the firmware does not drive it outside HW_TEST.
+ */
+&lfxo {
+	load-capacitors = "external";
+	/delete-property/ load-capacitance-picofarad;
+};
+
+&vregh {
+	status = "disabled";
+};
