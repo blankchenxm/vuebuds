@@ -410,6 +410,22 @@ int32_t ringFetchJpeg(const ring_entry_t *e, uint8_t quality, uint8_t *band, uin
   return n;
 }
 
+bool ringDropNewest(void)
+{
+  ringLock();
+  bool ok = m_count > 0 && (m_pinned == 0 || slot(m_count - 1)->seq != m_pinned);
+  if (ok) {
+    ring_entry_t *e = slot(m_count - 1);
+    m_write_addr = e->addr;
+    m_stats.used_bytes -= e->len;
+    m_stats.appended--;
+    m_count--;
+    m_stats.frames = m_count;
+  }
+  ringUnlock();
+  return ok;
+}
+
 void ringReset(void)
 {
   ringLock();

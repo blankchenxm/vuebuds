@@ -103,6 +103,23 @@ void cameraInit(void)
   NRF_LOG_RAW_INFO("[camera] %s %s, test pattern %d, sent as %ux%u\n", sensor->name,
                    camera_mode_name(CAMERA_MODE), CAMERA_TEST_PATTERN,
                    modeInfo.standard.width, modeInfo.standard.height);
+#ifdef CAMERA_REG_DUMP
+  // hub #68 item 3: compare the two boards' sensors (ID, revision, AE settings), read after init.
+  {
+    static const uint16_t blocks[][2] = {{0x0000, 0x0003}, {0x0100, 0x0104}, {0x0202, 0x0205}, {0x020E, 0x020F},
+                                         {0x2000, 0x203F}, {0x3024, 0x3030}};
+    for (int b = 0; b < (int)ARRAY_SIZE(blocks); b++) {
+      for (uint16_t r = blocks[b][0]; r <= blocks[b][1]; r += 8) {
+        NRF_LOG_RAW_INFO("[regs] %04x:", r);
+        for (uint16_t k = r; k < r + 8 && k <= blocks[b][1]; k++) {
+          NRF_LOG_RAW_INFO(" %02x", i2cRead16(CAMERA_I2C_ADDR, k));
+        }
+        NRF_LOG_RAW_INFO("\n");
+        k_msleep(5);  // RTT buffer is 512 B
+      }
+    }
+  }
+#endif
 
   capture_init(&modeInfo);
 
@@ -185,9 +202,11 @@ static uint64_t wakeAtUs;  // cameraWakeAt() armed for this local time (0: none)
 
 // No frame boundary in time (seen on the first wake after the stream starts, when FVLD
 // stays high from one frame to the next): sleep anyway, like PR #26's 30 ms timeout.
+static volatile bool sleepTimedOut;
 static void sleepTimeout(struct k_timer *timer)
 {
   if (sleepState == CAMERA_FALLING_ASLEEP) {
+    sleepTimedOut = true;
     capture_xsleep(false);
     NRF_LOG_RAW_INFO("%08d [cam] no frame boundary within %u ms, XSLEEP low anyway\n", systemTimeGetMs(),
                      sleepTimeoutMs);
@@ -332,6 +351,7 @@ void cameraSleepOnFrameBoundary(void)
   // wake one frame slower (QVGA 131 -> 235 ms to the first FVLD). DPPI pulls it low on the
   // FVLD fall; cameraAsleep() then stops MCLK.
   sleepState = CAMERA_FALLING_ASLEEP;
+  sleepTimedOut = false;
   wakeAtUs = 0;
   sleepTimeoutMs = capture_xsleep_on_frame_boundary() ? CAMERA_SLEEP_AFTER_FRAME_TIMEOUT_MS
                                                       : CAMERA_SLEEP_ANYTIME_TIMEOUT_MS;
@@ -347,6 +367,23 @@ void cameraAsleep(void)
   nrf_delay_us(CAMERA_XSLEEP_SETTLE_US);
   capture_mclk_enable(false);
   sleepState = CAMERA_ASLEEP;
+}
+
+bool cameraWaitAsleep(uint32_t *waited_us)
+{
+  uint32_t t0 = systemTimeGetUs();
+  uint32_t count0 = capture_asleep_count();  // called right after arming: the boundary is ahead
+  bool fired = false;
+  for (int i = 0; i < 1000 && sleepState == CAMERA_FALLING_ASLEEP && !sleepTimedOut; i++) {
+    if (capture_asleep_count() != count0) {
+      fired = true;
+      break;
+    }
+    k_busy_wait(200);
+  }
+  *waited_us = systemTimeGetUs() - t0;
+  cameraAsleep();
+  return fired;
 }
 
 bool cameraIsAsleep(void)

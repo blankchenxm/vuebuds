@@ -81,6 +81,7 @@ bool ringAppendJpeg(const camera_frame_t *frame, uint8_t quality, uint32_t seq, 
  * Returns the size (< 0: error); *us = read + encode. */
 int32_t ringFetchJpeg(const ring_entry_t *e, uint8_t quality, uint8_t *band, uint32_t *us);
 void ringReset(void);  // empty the ring and the statistics
+bool ringDropNewest(void);  // undo the last append (its bytes turned out bad)
 /* Read the entry back and compare its CRC; *read_us = time spent. */
 bool ringVerify(const ring_entry_t *e, uint32_t *read_us);
 /* Bytes [offset, offset + n) of the entry. */

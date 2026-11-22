@@ -188,6 +188,12 @@ static bool sendFormat(const camera_frame_t *frame, uint8_t format, uint8_t qual
 
 void imagePrepare(const camera_frame_t *frame)
 {
+  imagePrepareTime(frame);
+  imagePrepareExposure();
+}
+
+void imagePrepareTime(const camera_frame_t *frame)
+{
   const capture_stats_t *stats = capture_stats();
   memset(&m_header, 0, sizeof(m_header));
   m_header.width = frame->width;
@@ -203,6 +209,10 @@ void imagePrepare(const camera_frame_t *frame)
     m_header.capture_us = stats->start_us;
     m_capture_us = stats->start_us;
   }
+}
+
+void imagePrepareExposure(void)
+{
   camera_exposure_t e;
   if (cameraReadExposure(&e)) {
     m_header.integration = e.integration;

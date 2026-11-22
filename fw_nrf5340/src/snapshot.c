@@ -13,6 +13,7 @@
 #include "timers.h"
 #include "timesync.h"
 #include "ringcmd.h"
+#include "ring.h"
 #include "snapshot.h"
 
 #define SNAPSHOT_SLOT 0
@@ -51,6 +52,29 @@ static bool m_ring_due_pending;    // fixed exposure: waiting for the due timer
 
 static void request(picture_kind_t kind);
 static void ringSchedule(void);
+
+static uint64_t bridgeNowUs(void)
+{
+  uint64_t l = timesyncLocalUs(), b;
+  return timesyncLocalToBridge(l, &b) ? b : l;
+}
+
+// Where a ring picture's time went (hub #68 item 2), ms after its capture time T: first FVLD
+// (capture time), capture done, stored. host/ reads these lines.
+static void ringTiming(uint64_t T, uint64_t done_us, bool boundary, uint32_t wait_us, bool stored, bool early)
+{
+  uint64_t cap;
+  imageCaptureTime(&cap);
+  uint64_t now = bridgeNowUs();
+  int32_t fvld = (int32_t)(cap - T) / 1000, done = (int32_t)(done_us - T) / 1000, end = (int32_t)(now - T) / 1000;
+  if (early) {
+    NRF_LOG_RAW_INFO("%08d [ring] timing: fvld +%d done +%d asleep %s %u us, %s +%d ms (early arm)\n", systemTimeGetMs(),
+                     fvld, done, boundary ? "boundary" : "timeout", wait_us, stored ? "stored" : "NOT stored", end);
+  } else {
+    NRF_LOG_RAW_INFO("%08d [ring] timing: fvld +%d done +%d, %s +%d ms\n", systemTimeGetMs(), fvld, done,
+                     stored ? "stored" : "NOT stored", end);
+  }
+}
 
 static void ringDue(struct k_timer *timer)
 {
@@ -154,22 +178,63 @@ void snapshotFrameDone(void)
     cameraArmSlot(SNAPSHOT_SLOT, 0);
     return;
   }
+  uint64_t done_us = bridgeNowUs();
+  bool sleep = m_s2 && !cameraExposureManual();
+  // Capture ends ~13 ms (VGA ~28 ms) before the frame boundary, where DPPI pulls XSLEEP low.
   if (ok) {
+#ifdef SNAP_SLEEP_FIRST
+    // Experiment (hub #68 item 2): every picture's sleep ran into the 16 ms timeout (no FVLD fall)
+    // while Monitor's, armed right at the end of the capture, mostly did not. Here the sleep is
+    // armed before the exposure registers are read over I2C.
+    imagePrepareTime(&frame);
+    if (sleep) {
+      cameraSleepOnFrameBoundary();
+    }
+    imagePrepareExposure();
+#else
     imagePrepare(&frame);  // exposure over I2C: before S2, which turns I2C off (~3 ms of the 13)
+    if (sleep) {
+      cameraSleepOnFrameBoundary();
+    }
+#endif
     if (m_kind == PIC_TIMED) {
       imageAddFlags(BLE_HEADER_TIMED | (m_skipped ? BLE_HEADER_SKIPPED : 0));
       m_skipped = false;
     }
-  }
-  bool sleep = m_s2 && !cameraExposureManual();
-  if (sleep) {
-    // Capture ends ~13 ms (VGA ~28 ms) before the frame boundary, where DPPI pulls XSLEEP low.
+  } else if (sleep) {
     cameraSleepOnFrameBoundary();
   }
   picture_kind_t kind = m_kind;
+  uint64_t T = m_ring_T;
   if (kind == PIC_RING) {
-    m_ring_last_T = m_ring_T;
+    m_ring_last_T = T;
   }
+#ifdef RING_EARLY_ARM
+  if (kind == PIC_RING && ok && sleep && m_ring_period_ms) {
+    // Experiment (hub #68 item 2, VGA): wait for the boundary here and arm the next wake before
+    // encoding, so the encode overlaps the next wake's ~0.3 s to its first FVLD. The slot is
+    // overwritten from that FVLD on: if it came before the frame was stored, the entry is dropped.
+    uint32_t wait_us;
+    bool boundary = cameraWaitAsleep(&wait_us);
+    m_busy = false;
+    m_retakes = 0;
+    uint64_t fvld0 = timesyncLastFvldUs();
+    ringSchedule();
+    bool send = m_ring_send;
+    m_ring_send = false;
+    bool stored = ringcmdStore(&frame, send);
+    if (stored && timesyncLastFvldUs() != fvld0) {
+      ringDropNewest();
+      stored = false;
+      NRF_LOG_RAW_INFO("%08d [ring] next frame started before this one was stored: dropped\n", systemTimeGetMs());
+    }
+    if (!stored) {
+      m_ring_skips++;
+    }
+    ringTiming(T, done_us, boundary, wait_us, stored, true);
+    return;
+  }
+#endif
   if (!ok) {
     if (kind == PIC_RING) {
       m_ring_skips++;
@@ -180,8 +245,12 @@ void snapshotFrameDone(void)
     // Ring buffer running: stored; a 0xB2 picture also goes out (R_FRAME + frame).
     bool send = kind == PIC_REQUEST || m_ring_send;
     m_ring_send = false;
-    if (!ringcmdStore(&frame, send) && kind == PIC_RING) {
+    bool stored = ringcmdStore(&frame, send);
+    if (!stored && kind == PIC_RING) {
       m_ring_skips++;
+    }
+    if (kind == PIC_RING) {
+      ringTiming(T, done_us, false, 0, stored, false);
     }
   } else if (kind == PIC_RING) {
     // Stopped (0xB8 0) while this picture was under way: not stored.
