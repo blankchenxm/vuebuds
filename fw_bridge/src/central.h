@@ -2,6 +2,7 @@
 #ifndef CENTRAL_H_
 #define CENTRAL_H_
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <zephyr/bluetooth/addr.h>
 
@@ -12,6 +13,8 @@
 #define FRAME_EVENT  'E'  // payload: central_event_t
 #define FRAME_TEXT   'S'  // payload: log text
 #define FRAME_WRITE  'W'  // payload: int8 result of a control write (0 = queued)
+#define FRAME_TIME   'Q'  // payload: token u32, bridge time u64 (us, controller clock), ok u8 (always 1)
+#define FRAME_TIMED  'T'  // payload: command u8, T u64 (us, bridge time; 0 = not sent, no anchor yet)
 
 enum {
   CENTRAL_DISCONNECTED = 0,
@@ -38,5 +41,13 @@ void centralConfigure(const bt_addr_le_t *addrs, uint8_t count, uint16_t interva
 void centralWrite(uint8_t mask, const uint8_t *data, uint16_t len);
 /* Drop the links in mask; they reconnect by themselves (the camera reboots on disconnect). */
 void centralDisconnect(uint8_t mask);
+/* Time sync: write [cmd][this link's anchor u64][counter u16][T u64] to every ready slot in mask,
+ * T = the newest anchor point + delay_ms (the same T for all), e.g. cmd 0xB7 = picture at T. */
+void centralTimedWrite(uint8_t mask, uint16_t delay_ms, uint8_t cmd);
+
+/* Bridge time (the controller clock the anchor points use), us, from the bridge's boot. */
+bool centralNowUs(uint64_t *us);
+/* 'Q' [token u32] from the PC: reply FRAME_TIME at once (PC <-> bridge clock, INTERFACES C1). */
+void centralTimeReply(uint32_t token);
 
 #endif
