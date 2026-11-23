@@ -67,7 +67,7 @@ def save_local(d):
 def record(step, data):
     LOGS.mkdir(parents=True, exist_ok=True)
     s = json.loads(SUMMARY.read_text("utf-8")) if SUMMARY.exists() else {}
-    s[step] = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), **data}
+    s.setdefault(step, {}).update({"time": time.strftime("%Y-%m-%d %H:%M:%S"), **data})  # --side L, then R: keep both
     SUMMARY.write_text(json.dumps(s, indent=1, ensure_ascii=False), "utf-8")
 
 
