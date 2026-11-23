@@ -121,7 +121,8 @@ def probes():
             d = json.loads(line)
         except ValueError:
             continue
-        for dev in (d.get("data") or {}).get("devices", []) if d.get("type") == "task_end" else []:
+        data = (d.get("data") or {}) if d.get("type") == "task_end" else {}
+        for dev in (data.get("data") or data).get("devices", []):  # nrfutil 8: data.data.devices
             sn = dev.get("serialNumber", "").lstrip("0")
             if dev.get("traits", {}).get("jlink"):
                 found.append((sn, (dev.get("devkit") or {}).get("boardVersion")))
