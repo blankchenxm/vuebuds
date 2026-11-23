@@ -13,9 +13,10 @@ For the sw-mac settings page: camera.flash.command =
 - Programs the application core only (the four images share the same network core), erasing just
   the ranges the image covers, reads back to verify, then resets. The ring is in PSRAM and is lost
   on any reset anyway.
-- If the board's access port is protected (a new chip, or after a full erase), it recovers the
-  chip (full erase of both cores; Xiaomeng agreed for these two boards on 2026-11-22, hub #83),
-  programs the network core (net_ipc_radio.hex next to the image) and then the application core.
+- If the network core is locked or not running (a new chip, or after a full erase elsewhere) or the
+  application core is protected, it recovers the chip (full erase of both cores; Xiaomeng agreed for
+  these two boards on 2026-11-22, hub #83), programs the network core (net_ipc_radio.hex next to the
+  image) and then the application core (about +30 s).
 - Two boards can be flashed at the same time (one process per serial number).
 
 Exit codes: 0 flashed + verified + reset; 2 refused (serial / image / board mismatch); 3
@@ -105,10 +106,26 @@ def main():
     if code or serial not in out:
         fail(4, f"J-Link {serial} not found on USB")
 
-    say(f"programming the application core of {BOARDS[serial]} (J-Link {serial})")
-    code, out = program(serial, image, "application")
-    if code and "protect" in out.lower():
-        say("access port protected: recover (full erase of both cores), then network + application core")
+    # A network core that is locked or not running (new chip, or after a full erase elsewhere) needs the
+    # full path: with only the application core flashed, the board would boot without its BLE radio.
+    code, out = run(["protection-get", "--serial-number", serial, "--core", "Network"], timeout=60)
+    if code and "LOW_VOLTAGE" in out:
+        fail(4, f"J-Link {serial} sees no target voltage (LOW_VOLTAGE): board not powered or debug FPC not plugged in")
+    net_ok = code == 0 and "access is enabled" in out
+    if net_ok:
+        code, out = run(["read", "--serial-number", serial, "--core", "Network", "--address", "0x01000000",
+                         "--bytes", "4"], timeout=60)
+        if code == 0 and "FFFFFFFF" in out.upper().replace(" ", ""):
+            say("network core is empty (erased): programming it first")
+            code, out = program(serial, image.parent / NET_IMAGE, "network")
+            if code:
+                fail(3, f"network core failed: {out[-400:]}")
+    if net_ok:
+        say(f"programming the application core of {BOARDS[serial]} (J-Link {serial})")
+        code, out = program(serial, image, "application")
+    if not net_ok or (code and "protect" in out.lower()):
+        say("network core locked / not running, or access port protected: recover (full erase of both cores), "
+            "then network + application core")
         net = image.parent / NET_IMAGE
         if not net.is_file():
             fail(3, f"recover needs {net} for the network core")
