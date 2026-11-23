@@ -5,7 +5,7 @@
 
 ---
 
-## 2026-11-22 · V3：PSRAM 默认四线、LDO 1.8 V、R_STATUS 加相机字节(PR #?,hub #92)
+## 2026-11-22 · V3：PSRAM 默认四线、LDO 1.8 V、R_STATUS 加相机字节(PR #66,hub #92)
 
 - **阶段**:V3 后续(hub #92,Xiaomeng 11-22 同意)
 - **改了什么**:
