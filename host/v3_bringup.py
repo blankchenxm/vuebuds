@@ -344,7 +344,20 @@ def ringtime(a):
                     frames, _, dt = ss.fetch(b, P.fetch_nearest_command(ss.bridge_now() - 2_000_000))
                     if frames:
                         fetch[b.name].append((dt, len(frames[0][1].data) or len(frames[0][1].pixels)))
+            pairs = []  # both boards asked for the frame nearest to the same time at once
+            for _ in range(a.pairs):
+                t = ss.bridge_now() - 2_000_000
+                marks = [b.mark() for b in ss.boards]
+                t0 = time.monotonic()
+                ss.send(P.fetch_nearest_command(t))
+                got = [b.wait(m, lambda k, o: k == "frame", 30.0)[1] for b, m in zip(ss.boards, marks)]
+                if all(got):
+                    pairs.append(max(f.completed_at for f in got) - t0)
+                time.sleep(0.5)
+            fetch["pairs"] = pairs
             ss.ask(P.ring_command(0), (P.R_STATUS,), timeout=8)
+            st = ss.status()
+            fetch["status"] = st
     finally:
         for lg in loggers:
             lg.stop()
@@ -362,6 +375,16 @@ def ringtime(a):
         print(f"  {b} {a.label} {a.format}: {r['n']} stored, wake -> stored median {r['stored_ms']:.0f} ms "
               f"(max {r['stored_max']}), encode/copy + PSRAM write {r['write_ms']:.1f} ms; fetch one median "
               f"{r['fetch_s']:.3f} s ({r['bytes']:.0f} B); skipped (last R_STATUS) {skipped}")
+    pr = fetch.get("pairs", [])
+    if pr:
+        print(f"  pair fetch ({len(pr)}/{a.pairs}): median {statistics.median(pr):.3f} s, max {max(pr):.3f} s")
+    res["pairs_s"] = pr
+    for b, st in zip([HOST_NAME[s] for s in "LR"], fetch.get("status") or []):
+        if st and st["frames"]:
+            per = st["used_kb"] / st["frames"]
+            n = min(512, int(st["total_kb"] / per)) if per else 0
+            print(f"  {b}: {st['frames']} frames use {st['used_kb']} KB ({per:.1f} KB each): the ring holds ~{n} "
+                  f"frames = {n * a.period / 1000:.0f} s at {a.period} ms (index max 512); skipped {st['skipped']}")
     record(f"ringtime_{a.label}_{a.format}", res)
 
 
@@ -433,6 +456,7 @@ def main():
     p.add_argument("--period", type=int, default=1000)
     p.add_argument("--seconds", type=float, default=12)
     p.add_argument("--fetches", type=int, default=5)
+    p.add_argument("--pairs", type=int, default=0, help="also fetch N pairs (both boards at once)")
     a = ap.parse_args()
     {"b0": b0, "b1": b1, "b1-psram": b1_psram, "b1-ble": b1_ble, "b2": b2, "b3": b3, "b4": b4, "ringtime": ringtime}[a.step](a)
 

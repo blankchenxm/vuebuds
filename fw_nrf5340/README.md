@@ -152,6 +152,25 @@ python3 tools/dk5340.py run --board V3R --cflags 'HW_TEST;HW_TEST_PSRAM_ONLY' --
 ../host/.venv/bin/python ../host/v3_bringup.py ringtime --label quad --format raw         # ring store / fetch time
 ```
 
+### Prebuilt V3 images and the flash command (hub #104)
+
+The host's settings page picks VGA or QVGA and reflashes when the board has the other one (no
+runtime switch; INTERFACES C1). `tools/v3_images.py` builds the four images from the current commit
+(pristine, default options) into `~/vuebuds-fw/v3/`: `V3L_QVGA.hex`, `V3L_VGA.hex`, `V3R_QVGA.hex`,
+`V3R_VGA.hex` (application core), `net_ipc_radio.hex` (network core, the same for all four),
+`manifest.json` (commit, board, mode, sha256) and a copy of `tools/v3_flash.py`. Rerun it after
+every firmware change meant for the V3 boards; it refuses uncommitted changes.
+
+```bash
+python3 tools/v3_images.py
+python3 ~/vuebuds-fw/v3/v3_flash.py --serial 53001962 --image ~/vuebuds-fw/v3/V3L_VGA.hex
+```
+
+`v3_flash.py` accepts only J-Link 53001962 (left) / 53001982 (right) and only that board's images
+(manifest sha256), programs the application core (erase of the touched ranges, read-back verify),
+resets; a protected chip is recovered first and gets both cores. Exit 0 ok, 2 refused, 3 failed,
+4 J-Link not found; the last line is `OK ...` / `FAIL ...`.
+
 ## Not ported
 
 `fw/wiring_test.c`, and the VueBuds board's PMU, IMU, buttons, LEDs, CLI and power-off path.
