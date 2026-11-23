@@ -40,7 +40,8 @@ def main():
     ap.add_argument("--allow-dirty", action="store_true", help="for trying the script only; the manifest says so")
     a = ap.parse_args()
 
-    dirty = git("status", "--porcelain", "--", "fw_nrf5340", "fw/sensors")
+    dirty = "\n".join(ln for ln in git("status", "--porcelain", "--", "fw_nrf5340", "fw/sensors").splitlines()
+                      if "__pycache__" not in ln)
     if dirty and not a.allow_dirty:
         sys.exit(f"uncommitted changes, commit first:\n{dirty}")
     commit = git("rev-parse", "--short=7", "HEAD")
