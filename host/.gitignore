@@ -4,3 +4,4 @@ captures/
 __pycache__/
 .env
 boards.local.json
+v3_boards.local.json

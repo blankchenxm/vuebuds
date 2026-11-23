@@ -11,5 +11,6 @@ void i2cInit(void);
 void i2cWrite16(uint8_t addr, uint16_t reg, uint8_t data);  // reads the register back, logs a mismatch
 void i2cWrite16NoVerify(uint8_t addr, uint16_t reg, uint8_t data);
 uint8_t i2cRead16(uint8_t addr, uint16_t reg);              // 0 on a NACK, like fw/
+int i2cTryRead16(uint8_t addr, uint16_t reg, uint8_t *val);  // no log; 0 or the I2C error (probes)
 
 #endif

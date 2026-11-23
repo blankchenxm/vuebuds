@@ -1004,7 +1004,9 @@ void hwTestRun(void)
   if (id == 0x0360) {
     cameraSensorStream();  // MCLK on; the tests set MODE_SELECT themselves
     setMode(MODE_SLEEP);
+#ifndef BOARD_V3  // FSIN is not connected on V3 (board.yaml)
     testFsin();
+#endif
     testTrigger();
     testInt();
   }

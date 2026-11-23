@@ -125,7 +125,10 @@ static void request(picture_kind_t kind)
   if (!m_started) {
     cameraInit();
     if (cameraModelId() == 0) {
-      NRF_LOG_RAW_INFO("[snap] no camera sensor found\n");
+      // No camera (V3 boards come up without one, hub #83): stop the timed capture / ring too,
+      // so R_STATUS says stopped (0) instead of a ring that never takes a picture.
+      NRF_LOG_RAW_INFO("[snap] no camera sensor found%s\n", snapshotMode() ? ": timed capture / ring stopped" : "");
+      snapshotStop();
       return;
     }
     m_s2 = (cameraModelId() == HM0360_MODEL_ID);

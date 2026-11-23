@@ -123,6 +123,30 @@ python3 tools/dk5340.py camera --seconds 20              # reset + viewer.py ove
 | HM0360 | 1050035314 | DA:E7:DE:69:E3:5E |
 | HM0360B (HM01B0 until 10-06) | 1050017384 | EA:F1:6D:2A:C0:BB |
 
+## V3 board (balsamic3, hub #83, 2026-11-22)
+
+Same firmware, chosen at build time: `--board V3L` / `V3R` builds with `CAM_BOARD=V3_L` / `V3_R`
+(defines `BOARD_V3`, `BOARD_SIDE`) and adds `boards/balsamic3.overlay`. The DK build is unchanged
+(no `BOARD_V3` code in it).
+
+- Pins: as on the DK (kicad-agent-flow `boards/balsamic3/board.yaml`, hub INTERFACES G): camera,
+  I2C P0.26 / P0.27, PSRAM on the QSPI pins (`src/psram.c`, single line 48 MHz by default). FSIN
+  is not connected on V3; no buttons or LEDs are used.
+- `boards/balsamic3.overlay` (from `fw_v3_test/`): 32.768 kHz crystal with the module's
+  external load capacitors, VDDH regulator off (VDD = VDDH = +1V8).
+- `src/pmic.c`: MAX77650 at 0x48; first thing in `main()` SBB2 (camera AVDD) 3.3 V → 2.8 V
+  (as `fw_v3_test`), then the PMIC status and rails are logged (`[pmic] …`).
+- No camera module: the boot probe (`cameraProbe()`) logs `[camera] no camera`; `0xB2` takes
+  nothing, `0xB8 1` / `0xB8 2` stop at once, so `R_STATUS` says state 0 (all boards since PR #64).
+- Flash / log through the external J-Link: `--snr <serial>`, or the serial saved by
+  `host/v3_bringup.py b0` in `host/v3_boards.local.json`; RTT and J-Link Commander at 1 MHz.
+
+```bash
+python3 tools/dk5340.py run --board V3L --snr <J-Link serial> --seconds 12
+python3 tools/dk5340.py run --board V3R --cflags 'HW_TEST;HW_TEST_PSRAM_ONLY' --seconds 240
+../host/.venv/bin/python ../host/v3_bringup.py b0 | b1 | b1-psram | b1-ble | b2 | b3 | b4   # hub #83 stage 2
+```
+
 ## Not ported
 
 `fw/wiring_test.c`, and the VueBuds board's PMU, IMU, buttons, LEDs, CLI and power-off path.

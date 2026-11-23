@@ -58,6 +58,11 @@
       取帧由比主线程低的发送线程做,取帧时照常拍。
     - **断线**:断线仍然重启、环清空(Xiaomeng 11-21);`0xB8 0` 后可以 `0xB1`。
     - 测试:`host/m2_test.py`(表见 DEVLOG 11-21)。
+  - **V3 板(balsamic3)= 同一份 `fw_nrf5340/`,编译时选**(hub #83,Xiaomeng 11-22):`dk5340.py --board V3L|V3R [--snr <外接 J-Link>]`
+    → `CAM_BOARD=V3_L/V3_R`(宏 `BOARD_V3`、`BOARD_SIDE`)+ `boards/balsamic3.overlay`(32 kHz 晶振用模块内电容、关 VDDH)。
+    引脚和开发板相同(`kicad-agent-flow/boards/balsamic3/board.yaml`);开机先把 PMIC SBB2(相机 AVDD)从 3.3 V 调到 2.8 V(`src/pmic.c`,沿用 `fw_v3_test`),
+    再探测相机,没接就打 `[camera] no camera`;没相机时 `0xB8 1/2` 立刻停、`R_STATUS` 状态 0。**开发板的编译结果不含 V3 代码**。
+    外接 J-Link 用 1 MHz(`host/protocol.py` 的 `swd_khz`)。上板步骤:`host/v3_bringup.py b0 … b4`。
 
 ## 仓库结构
 

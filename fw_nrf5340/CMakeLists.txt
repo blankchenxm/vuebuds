@@ -9,7 +9,9 @@ project(vuebuds_nrf5340)
 #   CAM_TEST_PATTERN  OFF (default), COLOR_BAR or WALKING_1
 #   CAM_APP           STREAM (default) or MONITOR
 #   EXTRA_DEFINES     extra defines, ';'-separated (like fw/'s CFLAGS=-DXXX)
-foreach(var CAM_MODE CAM_TEST_PATTERN CAM_APP EXTRA_DEFINES)
+#   CAM_BOARD         DK (default) or V3_L / V3_R: the V3 board (balsamic3, hub #83), with
+#                     boards/balsamic3.overlay passed as EXTRA_DTC_OVERLAY_FILE (dk5340.py)
+foreach(var CAM_MODE CAM_TEST_PATTERN CAM_APP EXTRA_DEFINES CAM_BOARD)
   zephyr_get(${var} SYSBUILD LOCAL)
 endforeach()
 if(NOT CAM_MODE)
@@ -21,7 +23,10 @@ endif()
 if(NOT CAM_APP)
   set(CAM_APP STREAM)
 endif()
-message(STATUS "vuebuds: CAM_MODE=${CAM_MODE} CAM_TEST_PATTERN=${CAM_TEST_PATTERN} CAM_APP=${CAM_APP} EXTRA_DEFINES=${EXTRA_DEFINES}")
+if(NOT CAM_BOARD)
+  set(CAM_BOARD DK)
+endif()
+message(STATUS "vuebuds: CAM_MODE=${CAM_MODE} CAM_TEST_PATTERN=${CAM_TEST_PATTERN} CAM_APP=${CAM_APP} CAM_BOARD=${CAM_BOARD} EXTRA_DEFINES=${EXTRA_DEFINES}")
 
 set(FW ${CMAKE_CURRENT_SOURCE_DIR}/../fw)
 
@@ -31,6 +36,11 @@ target_compile_definitions(app PRIVATE
   CAMERA_TEST_PATTERN=CAMERA_TEST_PATTERN_${CAM_TEST_PATTERN}
   ${EXTRA_DEFINES}
 )
+if(CAM_BOARD MATCHES "^V3_([LR])$")
+  target_compile_definitions(app PRIVATE BOARD_V3 BOARD_SIDE="${CMAKE_MATCH_1}")
+elseif(NOT CAM_BOARD STREQUAL "DK")
+  message(FATAL_ERROR "CAM_BOARD must be DK, V3_L or V3_R, not ${CAM_BOARD}")
+endif()
 if(CAM_APP STREQUAL "MONITOR")
   target_compile_definitions(app PRIVATE CAMERA_APP_MONITOR)
 endif()

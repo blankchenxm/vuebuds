@@ -5,6 +5,38 @@
 
 ---
 
+## 2026-11-22 · V3 板（balsamic3）作为编译选项进正式固件 + 上板脚本（PR #64,hub #83 第一段）
+
+- **阶段**:V3 迁移(hub #83 / #8;STATUS F2、H1、H2 的一部分)
+- **改了什么**:
+  - `fw_nrf5340/tools/dk5340.py`:`--board V3L|V3R` → `-Dfw_nrf5340_CAM_BOARD=V3_L|V3_R` + `EXTRA_DTC_OVERLAY_FILE=boards/balsamic3.overlay`;`--snr` 按外接 J-Link 烧录 / 抓日志(没给时读 `host/v3_boards.local.json`);编译目录 `build_v3l_qvga` 等;V3 的 RTT 用 1 MHz。
+  - `CMakeLists.txt`:`CAM_BOARD`(DK 默认 / V3_L / V3_R)→ 宏 `BOARD_V3`、`BOARD_SIDE`。
+  - **新** `boards/balsamic3.overlay`:沿用 `fw_v3_test/`(10 月在 V3 上验证过):32.768 kHz 晶振用模块内的负载电容(ISP2053 DS R11 p.8)、关 VDDH 稳压器(VDD = VDDH = +1V8)。32 MHz 晶振 Zephyr 默认就不加片内电容,和模块一致。引脚和开发板完全相同(board.yaml 逐脚核对过:相机、I2C、QSPI PSRAM);FSIN 在 V3 上没接,HW_TEST 跳过 FSIN 项。
+  - **新** `src/pmic.c` / `.h`(只在 V3 编译):`main()` 第一件事把 MAX77650 SBB2(相机 AVDD)从 3.3 V 调到 2.8 V(同 `fw_v3_test`),再打印 STAT_GLBL / CID / ERCFLAG / 充电输入状态和各路的寄存器值。LDO(+1V8)、LED、充电、电源键都不动。
+  - `src/camera.c`:`cameraProbe()`(只在 V3):开机开 MCLK、复位、静默读 0x0000–0x0003,打印 `[camera] no camera …` 或型号 + 硅片版本,然后关 MCLK、XSHUTDOWN 拉回低。`compat/i2c.c` 加不打日志的 `i2cTryRead16()`(只在 V3)。
+  - `src/snapshot.c`:**所有板子**:找不到相机时同时停掉定时拍 / 环形缓存,`R_STATUS` 回状态 0(原来 `0xB8 2` 后状态一直是 2,但一张也不拍)。
+  - `host/protocol.py`:`BOARDS` 加 `v3-left` / `v3-right`(序列号、地址从 `v3_boards.local.json` 读,gitignore);`tools/devtools.py`:`SWD_KHZ` 按 J-Link 序列号选 SWD 速度(V3 1 MHz),`RttLogger` / `jlink_commands` 都用它。
+  - **新** `host/v3_bringup.py`:第二段的关卡脚本,`b0`(认 J-Link、左右、读芯片)→ `b1`(烧正式固件,看 PMIC / 各路 / PSRAM 开机自检 / 没接相机 / 蓝牙地址)→ `b1-psram`(HW_TEST 只测 PSRAM:单线、8 MB × 2、四线)→ `b1-ble`(桥连两块板、`R_STATUS`、没相机时的行为)→ `b2`(相机型号和硅片版本、`0xB2` JPEG 经桥、唤醒到出帧)→ `b3`(`m2_test.py` 1–8)→ `b4`(开发板 vs V3 对比表)。每关只做自己的事,结果写 `logs/v3/summary.json`。
+- **为什么**:Xiaomeng 11-22:开发板上的功能做完了,正式固件移植到 V3,两块板快速过一遍;开发板的编译结果不能变。
+- **和原来行为的差别**:开发板上只有一处:找不到相机时停掉定时拍 / 环形缓存(上面 `snapshot.c`)。V3 的代码都在 `BOARD_V3` 里。
+- **验证(第一段,没有板子)**:
+  - 编译:V3L、V3R、V3L + `HW_TEST;HW_TEST_PSRAM_ONLY`、DK QVGA、DK `HW_TEST` 都通过。V3 的 `zephyr.dts`:`lfxo` 为 external、`vregh` disabled;`.config` 和 DK 只差 `REGULATOR_HV` 一项。
+  - 开发板编译结果:和改动前的 `main`(870d836)比,符号表只有 `request`(snapshot.c)变了大小(0xa4 → 0xc0),网络核镜像完全相同;V3 的函数 / 字符串(`pmicInit`、`cameraProbe`、`[pmic]`)不在 DK 镜像里。
+  - 没有在 V3 上跑过:第二段(hub #83)按 `v3_bringup.py` 上板后补结果,通过后再合并。
+- **验证(第二段 B0 / B1,两块 V3,没接相机,11-22)**:
+  - B0:左 V3L = 外接 J-Link 53001962,右 V3R = 53001982(序列号小的是左);VTref 1.86 / 1.89 V;FICR PART 0x5340、VARIANT `CLAA`。
+  - 两块的**网络核**出厂开着读保护(应用核没有):Xiaomeng 同意后 `west flash --recover` 整片擦除 + 烧录;单独 `nrfutil device recover` 后网络核复位又锁上,`west flash` 仍失败,要用 `--recover` 一次做完。之后 `dk5340.py flash --snr` 正常。
+  - B1:MAX77650(DIDM 0)、ERCFLAG 0x00;**SBB2 回读 0xe8 = 2.80 V**(右板第一次开机看到 0xf2 3.3 V → 2.8 V;nRF 复位时 PMIC 不断电,保持 2.8 V);LDO / SBB1 / SBB0 寄存器换算 1.85 / 1.20 / 2.05 V(没表测,Xiaomeng 说不用量)。PSRAM 开机自检 OK,`[camera] no camera`,正常启动。
+  - PSRAM(`HW_TEST;HW_TEST_PSRAM_ONLY`):单线 8–96 MHz 0 错,默认单线 48 MHz 写 / 读 2730 KB/s、CE# 最长 7.1 µs;**8 MB × 2 遍 0 错**;**四线 8–96 MHz 0 错**、单线 / 四线交叉 0 错(开发板杜邦线上四线不稳,V3 上稳;默认仍是单线)。唯一 FAIL 是 [1] HM0360 I2C(没接相机)。
+  - 蓝牙经桥同时连两块:`R_STATUS` psram 0、环 7680 KB、synced 1;没相机时 `0xB8 2` → 状态 0、`0xB2` 没有帧。
+  - `v3_bringup.py` 修一处:`nrfutil device list --json` 的设备列表在 `data.data.devices`。
+- **遗留 / 下一步**:
+  - LDO 1.85 → 1.8 V、VSYS_REG 等 board.yaml 里写着"fw sets"的设置没做(没在板上验证过,不在 #83 里)。
+  - 除 SBB2 外各路电压的换算用的是数据手册的步进,要和表测(TP25 / TP27 / TP28)对一下。
+  - `R_STATUS` 里没有单独的"相机"字段;没接相机靠日志和 `0xB8 2` 后状态 0 看出来。要单独字段需要改 INTERFACES C2。
+  - 外接 J-Link 用 `nrfutil` 烧录在 V3 上可以(解锁后)。
+  - B2(接相机)/ B3 / B4 在 hub #83 里继续,合并后另补。
+
 ## 2026-11-21 · VGA 存进环更快（编译选项）+ 左板自动曝光检查（PR #63,hub #68 第 2、3 项）
 
 - **阶段**:F9 / F6(hub #68 第 2、3 项)

@@ -20,6 +20,7 @@ bool cameraGetFrame(camera_frame_t *frame);  // false for a bad frame (wrong DMA
 
 /* Monitor (HM0360) */
 uint16_t cameraModelId(void);              // 0 until cameraInit() found a sensor
+uint16_t cameraProbe(void);                // V3 only: model ID at boot (0: no camera), sensor left in reset
 const char *cameraModeName(void);
 uint32_t cameraSlotCount(void);            // frame pool slots for the compiled mode
 void cameraSensorStream(void);             // MCLK on + sensor streaming, nothing armed

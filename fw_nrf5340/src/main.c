@@ -23,6 +23,9 @@
 #include "i2c.h"
 #include "psram.h"
 #include "timers.h"
+#ifdef BOARD_V3
+#include "pmic.h"
+#endif
 
 #ifdef CAPTURE_STRESS_US
 extern void stressTestStart(void);
@@ -189,6 +192,11 @@ static K_TIMER_DEFINE(psramCheckTimer, psramCheckDue, NULL);
 
 int main(void)
 {
+#ifdef BOARD_V3
+  // V3 board (hub #83): camera AVDD from 3.3 V (PMIC power-up default) to 2.8 V before anything
+  // else; the camera stays in reset (XSHUTDN pull-down) until then.
+  bool pmicOk = pmicInit();
+#endif
 #ifdef CPU_128MHZ
   // Experiment (10-11): the application core runs at 64 MHz by default (HFCLK / 2); 128 MHz as
   // in nrf/samples/bluetooth/nrf_auraconfig, for the JPEG / PNG encoders.
@@ -196,7 +204,12 @@ int main(void)
   SystemCoreClockUpdate();
   NRF_LOG_RAW_INFO("[mustard] CPU %u MHz (%d)\n", SystemCoreClock / 1000000, divErr);
 #endif
+#ifdef BOARD_V3
+  NRF_LOG_RAW_INFO("%08d [mustard] booting... (nRF5340, V3 board %s, PMIC %s)\n", systemTimeGetMs(), BOARD_SIDE,
+                   pmicOk ? "ok" : "NOT OK");
+#else
   NRF_LOG_RAW_INFO("%08d [mustard] booting... (nRF5340)\n", systemTimeGetMs());
+#endif
   i2cInit();
 #ifdef HW_TEST
   extern void hwTestRun(void);
@@ -214,6 +227,9 @@ int main(void)
     eventQueuePush(EVENT_PSRAM_CHECK);  // failed at once: set up the ring (in RAM) now
   }
   bleInit();
+#ifdef BOARD_V3
+  cameraProbe();  // V3 boards start without a camera module (hub #83): say so in the log
+#endif
   NRF_LOG_RAW_INFO("%08d [mustard] booted\n", systemTimeGetMs());
 
 #ifdef CAMERA_APP_MONITOR

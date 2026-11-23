@@ -40,7 +40,30 @@ BOARDS = {
     "hm0360b-5340": {"snr": "1050017384", "address": "EA:F1:6D:2A:C0:BB",
                     "device": "nRF5340_xxAA_APP", "family": "nrf53", "rotate": 270,  # user 10-08: 90 + 180
                     "dk_board": "HM0360B"},
+    # V3 boards (balsamic3, hub #83), each on an external J-Link over the debug FPC (SWD 1 MHz).
+    # J-Link serial number and BLE address per board are kept in v3_boards.local.json until they
+    # are known for good (host/v3_bringup.py b0 / b1). rotate: not checked yet (B2).
+    "v3-left": {"snr": None, "address": None, "device": "nRF5340_xxAA_APP", "family": "nrf53", "rotate": 0,
+                "dk_board": "V3L", "swd_khz": 1000},
+    "v3-right": {"snr": None, "address": None, "device": "nRF5340_xxAA_APP", "family": "nrf53", "rotate": 0,
+                 "dk_board": "V3R", "swd_khz": 1000},
 }
+V3_LOCAL = pathlib.Path(__file__).resolve().parent / "v3_boards.local.json"  # {"V3L": {"snr", "address"}, ...}
+if V3_LOCAL.exists():
+    for _k, _v in json.loads(V3_LOCAL.read_text("utf-8")).items():
+        _b = {"V3L": "v3-left", "V3R": "v3-right"}.get(_k)
+        if _b:
+            BOARDS[_b].update({f: _v[f] for f in ("snr", "address") if _v.get(f)})
+
+
+def _register_swd_speeds():
+    import devtools  # noqa: E402 (../tools, path set above)
+    for _b in BOARDS.values():
+        if _b.get("snr") and _b.get("swd_khz"):
+            devtools.SWD_KHZ[str(_b["snr"])] = _b["swd_khz"]
+
+
+_register_swd_speeds()
 # macOS: CoreBluetooth hides BLE addresses; bleak connects by a UUID that this Mac assigns to
 # each board. Kept per machine in boards.local.json (gitignored), {board: uuid}, written by
 # `python ble_identify.py`. The bridge (bridge.py) still uses the addresses above.
