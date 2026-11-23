@@ -5,6 +5,36 @@
 
 ---
 
+## 2026-11-22 · V3：PSRAM 默认四线、LDO 1.8 V、R_STATUS 加相机字节(PR #66,hub #92)
+
+- **阶段**:V3 后续(hub #92,Xiaomeng 11-22 同意)
+- **改了什么**:
+  - `src/psram.h`:**只在 V3**(`BOARD_V3`)默认改成**四线 48 MHz、64 B 一段**;开发板仍是单线 48 MHz / 32 B。开机自检照旧(现在用四线跑),不过就退回片内 RAM,和原来一样。
+  - `src/pmic.c`(只在 V3):SBB2 之后把 LDO(+1V8)从 OTP 默认 0x28 = 1.85 V 调到 **0x24 = 1.80 V**(往低调,在 PSRAM 1.62–1.98 V、nRF 1.7–3.6 V 范围内),回读打日志;`pmicInit()` 的返回值也要求 LDO 回读对。
+  - `src/camera.c/.h`:`cameraState()`(0 还没检测 / 1 在 / 2 没找到):`cameraInit()` 检测后、V3 的 `cameraProbe()` 后更新。`src/ringcmd.c`:`R_STATUS` 末尾加这个字节(51 → 52 字节,INTERFACES C2,hub PR #95),RTT 那一行加 `camera N`。
+  - `host/protocol.py`:`R_STATUS` 多一个 `camera` 字段,51 字节的旧回复给 `None`(`unpack_from` 本来就忽略多出的字节)。`host/m2_test.py` 测试 1 检查它(开机后 0 或 1,开环后 1)。`host/v3_bringup.py`:`b1-ble` 要求没相机时为 2;新加 `ringtime`(开环 N 秒,RTT 取每帧"唤醒 → 存完"和"编码 / 拷贝 + 写 PSRAM",电脑端取帧时间)。
+- **为什么**:hub #83 后续三件。V3 的 PSRAM 在板上走线,四线 8–96 MHz 都 0 错(#83 B1);board.yaml 写着 LDO 由固件设 1.8 V;sw-mac 要能从 `R_STATUS` 知道相机在不在。
+- **和原来行为的差别**:开发板:`R_STATUS` 多 1 字节(值 0 → 第一次拍照后 1 / 2),其余不变;镜像和 main(e419561)比,只有 `cameraInit`(+0x14)、`drainReplies`(`sendStatus` 内联在里面,+0x10)变了,新增 `cameraState`、`m_state`;PSRAM 函数和网络核镜像完全相同。V3:PSRAM 四线、LDO 1.8 V。
+- **四线选哪一档**:48 MHz(和开发板单线同一个时钟,是能过的最高 96 MHz 的一半)、64 B 一段:CE# 最长读 3.6 / 写 4.2 µs(1000 段里最坏,`[5f]`),不到 tCEM 8 µs 的一半;128 B 一段要约 7.2 µs,太贴近。
+- **验证**(两块 V3 接相机,经桥):
+  - `b1-psram`(`HW_TEST;HW_TEST_PSRAM_ONLY`,默认四线):两块 **ALL PASS**:[5f] CE# 最坏 3.6 / 4.2 µs;[5g] 写 7.3 / 读 6.6 MB/s(单线时 2.7 / 2.7);**8 MB × 2 遍 0 错**(一遍写 2.0 s、读 + 比较 3.75 s;单线 3.9 / 5.5 s);非对齐 400 次 0 错。
+  - 开机:`[pmic] +1V8 LDO 0x28 -> 0x24: 1850 -> 1800 mV`(之后复位保持 0x24);SBB2 仍 0xe8 2.80 V;ERCFLAG 0x00;`[psram] QSPI quad 48 MHz, 64 B bursts`,开机自检 OK。
+  - 环形缓存一帧(`v3_bringup.py ringtime`,中位,左 / 右):
+
+    | | 单线(改之前) | 四线 |
+    |---|---|---|
+    | QVGA JPEG q85:编码 + 写 PSRAM / 唤醒 → 存完 | 68.0 / 59.4 ms;283 / 273 ms | 65.8 / 58.2 ms;280 / 272 ms |
+    | QVGA 原始 76.8 KB:写 PSRAM / 唤醒 → 存完 | 50.4 ms;265 ms | **33.1 ms;248 ms** |
+    | VGA 原始 300 KB:写 PSRAM / 唤醒 → 存完 | 204.8 ms;828 / 737 ms | **135.7 ms;759 / 667 ms** |
+    | VGA JPEG q85:编码 + 写 / 唤醒 → 存完 | 328.7 / 306.9 ms;952 / 838 ms | 323.7 / 304.2 ms;948 / 835 ms |
+    | 取一帧(经桥) | QVGA JPEG 0.18 / 0.10 s,原始 1.35 s;VGA 原始 6.2 / 6.0 s | 0.19 / 0.11 s,1.4 s;5.7 / 5.4 s |
+
+    JPEG 时间主要是编码,四线只省 2–3 ms;原始格式写 PSRAM 省 1/3。取帧受 BLE 限制,没变化(差别在噪声里)。
+  - `m2_test.py` 1–8 全部 OK:`R_STATUS` 开机后 camera 1(V3 开机就检测);测试 4 取 305 / 524 帧、跳过 0;测试 5 左 − 右 +0.05 到 +0.09 ms;测试 7 300 s 60 / 60、跳过 0;CRC 左 82 / 右 86 全部一致;0 坏帧。
+  - 编译:V3L / V3R QVGA、VGA、V3 `HW_TEST;HW_TEST_PSRAM_ONLY`、DK QVGA、DK `HW_TEST` 都通过。
+  - 一次 `ringtime`(VGA 原始)里左板没收到 `0xB3` / `0xB8`(RTT 里没有 `writing to 1403 0xb3/0xb8`,对时和取帧都收到了),重跑正常、m2_test 里没出现;记一笔,像是桥那边丢了一次写。
+- **遗留 / 下一步**:board.yaml 里其它"固件设置"项没做:VSYS_REG 4.3 V(充电器寄存器,F7)、SBB0 可选降到 2.0 V(只会减少 LDO 余量,不做)、电源键 5 s 关机(F7)。开发板(杜邦线)仍是单线。
+
 ## 2026-11-22 · V3 第二段 B2–B4 结果 + 上板脚本汇总修正(PR #65,hub #83)
 
 - **阶段**:上板验证 / 工具

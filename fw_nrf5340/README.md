@@ -130,14 +130,18 @@ Same firmware, chosen at build time: `--board V3L` / `V3R` builds with `CAM_BOAR
 (no `BOARD_V3` code in it).
 
 - Pins: as on the DK (kicad-agent-flow `boards/balsamic3/board.yaml`, hub INTERFACES G): camera,
-  I2C P0.26 / P0.27, PSRAM on the QSPI pins (`src/psram.c`, single line 48 MHz by default). FSIN
+  I2C P0.26 / P0.27, PSRAM on the QSPI pins (`src/psram.c`; V3 default **quad 48 MHz, 64 B bursts**
+  since hub #92, the DK stays single line 48 MHz / 32 B). FSIN
   is not connected on V3; no buttons or LEDs are used.
 - `boards/balsamic3.overlay` (from `fw_v3_test/`): 32.768 kHz crystal with the module's
   external load capacitors, VDDH regulator off (VDD = VDDH = +1V8).
 - `src/pmic.c`: MAX77650 at 0x48; first thing in `main()` SBB2 (camera AVDD) 3.3 V → 2.8 V
-  (as `fw_v3_test`), then the PMIC status and rails are logged (`[pmic] …`).
+  (as `fw_v3_test`), then the LDO (+1V8) 1.85 V → 1.8 V (hub #92), then the PMIC status and rails
+  are logged (`[pmic] …`). SBB0, VSYS_REG, charger, LEDs and the POWER button are not touched.
 - No camera module: the boot probe (`cameraProbe()`) logs `[camera] no camera`; `0xB2` takes
   nothing, `0xB8 1` / `0xB8 2` stop at once, so `R_STATUS` says state 0 (all boards since PR #64).
+  `R_STATUS` ends with a camera byte (hub #92, INTERFACES C2): 0 not checked yet (DK before its
+  first picture), 1 present, 2 missing.
 - Flash / log through the external J-Link: `--snr <serial>`, or the serial saved by
   `host/v3_bringup.py b0` in `host/v3_boards.local.json`; RTT and J-Link Commander at 1 MHz.
 
@@ -145,6 +149,7 @@ Same firmware, chosen at build time: `--board V3L` / `V3R` builds with `CAM_BOAR
 python3 tools/dk5340.py run --board V3L --snr <J-Link serial> --seconds 12
 python3 tools/dk5340.py run --board V3R --cflags 'HW_TEST;HW_TEST_PSRAM_ONLY' --seconds 240
 ../host/.venv/bin/python ../host/v3_bringup.py b0 | b1 | b1-psram | b1-ble | b2 | b3 | b4   # hub #83 stage 2
+../host/.venv/bin/python ../host/v3_bringup.py ringtime --label quad --format raw         # ring store / fetch time
 ```
 
 ## Not ported
