@@ -19,7 +19,7 @@ For the sw-mac settings page: camera.flash.command =
 - Two boards can be flashed at the same time (one process per serial number).
 
 Exit codes: 0 flashed + verified + reset; 2 refused (serial / image / board mismatch); 3
-programming failed; 4 J-Link not found. The last line is "OK ..." or "FAIL ..." with the reason.
+programming failed; 4 J-Link not on USB, or no target voltage (board off / FPC not plugged in). The last line is "OK ..." or "FAIL ..." with the reason.
 Standard library only; it runs from the folder the images are in (no repo needed).
 """
 import argparse
@@ -101,9 +101,9 @@ def main():
         say(f"{image.name}: {entry.get('board')} {entry.get('mode')}, commit {entry.get('commit')}")
 
     t0 = time.monotonic()
-    code, out = run(["list", "--serial-number", serial], timeout=30)
+    code, out = run(["list"], timeout=30)  # this nrfutil's "device list" has no --serial-number
     if code or serial not in out:
-        fail(4, f"J-Link {serial} not found (USB cable / board power)")
+        fail(4, f"J-Link {serial} not found on USB")
 
     say(f"programming the application core of {BOARDS[serial]} (J-Link {serial})")
     code, out = program(serial, image, "application")
@@ -119,6 +119,8 @@ def main():
         if code:
             fail(3, f"network core failed after recover: {out[-400:]}")
         code, out = program(serial, image, "application")
+    if code and "LOW_VOLTAGE" in out:
+        fail(4, f"J-Link {serial} sees no target voltage (LOW_VOLTAGE): board not powered or debug FPC not plugged in")
     if code:
         fail(3, f"programming failed: {out[-400:]}")
     code, out = run(["reset", "--serial-number", serial], timeout=30)
