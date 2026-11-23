@@ -267,10 +267,10 @@ def b1_ble(a):
         ss.send(bytes([P.CMD_SNAPSHOT]))
         frames = [b.wait(m, is_frame, 4.0)[1] for b, m in zip(ss.boards, marks)]
         for b, s, r, f in zip(ss.boards, sts, st_ring, frames):
-            ok = bool(s) and s["psram"] == 0 and s["total_kb"] == 7680 and s["synced"] == 1
+            ok = bool(s) and s["psram"] == 0 and s["total_kb"] == 7680 and s["synced"] == 1 and s.get("camera") == 2
             state = r.fields["state"] if r else None
             print(f"  {b.name}: connected, PSRAM state {s and s['psram']}, total {s and s['total_kb']} KB, synced "
-                  f"{s and s['synced']} -> {'ok' if ok else 'CHECK'}; 0xB8 2 without a camera -> state {state} "
+                  f"{s and s['synced']}, camera {s and s.get('camera')} (expect 2 = missing) -> {'ok' if ok else 'CHECK'}; 0xB8 2 without a camera -> state {state} "
                   f"(expect 0 = stopped); 0xB2 -> {'a frame?!' if f else 'no frame (expected)'}")
             res[b.name] = {"status": s, "ring_state_no_camera": state, "frame_without_camera": bool(f), "ok": ok}
     record("b1_ble", res)
@@ -320,6 +320,49 @@ def b2(a):
         subprocess.run([sys.executable, str(HERE / "ae_check.py"), "--boards", "v3-left", "v3-right", "--seconds",
                         str(a.ae_seconds), "--period-ms", "1000", "--csv", str(LOGS / "ae.csv"), "--rtt",
                         str(LOGS / "ae")], cwd=HERE)
+
+
+# ---------------- ring store / fetch time (hub #92: single line vs quad PSRAM) ----------------
+def ringtime(a):
+    """Ring at --period for --seconds, then --fetches fetches of the frame nearest to now - 2 s on each
+    board. Store time from RTT ("[ring] timing: ... stored +N ms", "encode + write N us"), fetch time from
+    the host. Same firmware mode as flashed (QVGA / VGA)."""
+    fmt = {"jpeg": (P.FORMAT_JPEG, 85), "raw": (P.FORMAT_RAW, 0)}[a.format]
+    prefix = LOGS / f"ringtime_{a.label}_{a.format}"
+    LOGS.mkdir(parents=True, exist_ok=True)
+    loggers = [devtools.RttLogger(snr(s), DEVICE, f"{prefix}_{s}.log") for s in "LR"]
+    fetch = {}
+    try:
+        with Link() as ss:
+            ss.send(P.set_format_command(*fmt))
+            time.sleep(0.2)
+            ss.ask(P.ring_command(a.period), (P.R_STATUS,), timeout=8)
+            time.sleep(a.seconds)
+            for b in ss.boards:
+                fetch[b.name] = []
+                for _ in range(a.fetches):
+                    frames, _, dt = ss.fetch(b, P.fetch_nearest_command(ss.bridge_now() - 2_000_000))
+                    if frames:
+                        fetch[b.name].append((dt, len(frames[0][1].data) or len(frames[0][1].pixels)))
+            ss.ask(P.ring_command(0), (P.R_STATUS,), timeout=8)
+    finally:
+        for lg in loggers:
+            lg.stop()
+    res = {}
+    for side, b in zip("LR", [HOST_NAME[s] for s in "LR"]):
+        text = pathlib.Path(f"{prefix}_{side}.log").read_text(errors="replace")
+        stored = [int(x) for x in re.findall(r"stored \+(\d+) ms", text)]
+        enc = [int(x) / 1000 for x in re.findall(r"(?:encode \+ )?write (\d+) us", text)]
+        skipped = sum(int(x) for x in re.findall(r"skipped (\d+)", text)[-1:])
+        f = fetch.get(b, [])
+        med = lambda v: statistics.median(v) if v else float("nan")  # noqa: E731
+        res[side] = {"stored_ms": med(stored), "stored_max": max(stored) if stored else None, "n": len(stored),
+                     "write_ms": med(enc), "fetch_s": med([x[0] for x in f]), "bytes": med([x[1] for x in f])}
+        r = res[side]
+        print(f"  {b} {a.label} {a.format}: {r['n']} stored, wake -> stored median {r['stored_ms']:.0f} ms "
+              f"(max {r['stored_max']}), encode/copy + PSRAM write {r['write_ms']:.1f} ms; fetch one median "
+              f"{r['fetch_s']:.3f} s ({r['bytes']:.0f} B); skipped (last R_STATUS) {skipped}")
+    record(f"ringtime_{a.label}_{a.format}", res)
 
 
 def b3(a):
@@ -384,8 +427,14 @@ def main():
     p.add_argument("--tests", default="1,2,3,4,5,6,7,8")
     p.add_argument("--duration", type=float, default=300.0, help="test 7 seconds")
     sub.add_parser("b4")
+    p = sub.add_parser("ringtime")
+    p.add_argument("--label", required=True, help="e.g. single / quad (goes into the log names)")
+    p.add_argument("--format", choices=["jpeg", "raw"], default="jpeg")
+    p.add_argument("--period", type=int, default=1000)
+    p.add_argument("--seconds", type=float, default=12)
+    p.add_argument("--fetches", type=int, default=5)
     a = ap.parse_args()
-    {"b0": b0, "b1": b1, "b1-psram": b1_psram, "b1-ble": b1_ble, "b2": b2, "b3": b3, "b4": b4}[a.step](a)
+    {"b0": b0, "b1": b1, "b1-psram": b1_psram, "b1-ble": b1_ble, "b2": b2, "b3": b3, "b4": b4, "ringtime": ringtime}[a.step](a)
 
 
 if __name__ == "__main__":

@@ -181,7 +181,7 @@ def fmt_status(s):
     return (f"state {s['state']} period {s['period']} fmt {s['format']}/q{s['quality']} frames {s['frames']} "
             f"#{s['oldest_seq']}..#{s['newest_seq']} t {s['oldest_us'] / 1e6:.3f}..{s['newest_us'] / 1e6:.3f} "
             f"now {s['now_us'] / 1e6:.3f} {s['used_kb']}/{s['total_kb']} KB skipped {s['skipped']} "
-            f"overwritten {s['overwritten']} psram {s['psram']} synced {s['synced']}")
+            f"overwritten {s['overwritten']} psram {s['psram']} synced {s['synced']} camera {s.get('camera')}")
 
 
 def phase_of(t_us, period_ms):
@@ -204,7 +204,9 @@ def test1(ss, period):
             say(f"  {what:24s} {b.name:13s} {fmt_status(s)} {'OK' if not problems else 'BAD ' + ','.join(problems)}")
 
     common = {"synced": lambda s: s["synced"] == 1, "psram": lambda s: s["psram"] == 0,
-              "total_kb": lambda s: s["total_kb"] == 7680, "format": lambda s: s["format"] == 2 and s["quality"] == 85}
+              "total_kb": lambda s: s["total_kb"] == 7680, "format": lambda s: s["format"] == 2 and s["quality"] == 85,
+              # hub #92: 1 present; 0 = not checked yet is fine on a DK before its first picture
+              "camera": lambda s: s.get("camera") in (0, 1)}
     ss.sync()
     # Within 2 s of boot the reply waits for the PSRAM check.
     row("0xB9 after boot", ss.status(), {**common, "state": lambda s: s["state"] == 0, "frames": lambda s: s["frames"] == 0})
@@ -214,7 +216,7 @@ def test1(ss, period):
     now = ss.bridge_now()
     sts = ss.status()
     row("0xB9 after 6.5 s", sts, {
-        **common, "frames": lambda s: 4 <= s["frames"] <= 7,
+        **common, "frames": lambda s: 4 <= s["frames"] <= 7, "camera_present": lambda s: s.get("camera") == 1,
         "spacing": lambda s: abs((s["newest_us"] - s["oldest_us"]) - (s["frames"] - 1) * period * 1000) < period * 500,
         "phase": lambda s: phase_of(s["newest_us"], period) < 300,
         "now": lambda s: abs(s["now_us"] - now) < 100_000,

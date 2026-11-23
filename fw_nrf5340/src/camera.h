@@ -20,6 +20,11 @@ bool cameraGetFrame(camera_frame_t *frame);  // false for a bad frame (wrong DMA
 
 /* Monitor (HM0360) */
 uint16_t cameraModelId(void);              // 0 until cameraInit() found a sensor
+/* R_STATUS camera byte (INTERFACES C2, hub #92): last detection's result, not updated while running. */
+#define CAMERA_STATE_UNCHECKED 0  // DK: no picture asked for yet (the camera is initialized lazily)
+#define CAMERA_STATE_PRESENT   1  // a sensor answered at 0x24
+#define CAMERA_STATE_MISSING   2  // detection ran, nothing answered
+uint8_t cameraState(void);
 uint16_t cameraProbe(void);                // V3 only: model ID at boot (0: no camera), sensor left in reset
 const char *cameraModeName(void);
 uint32_t cameraSlotCount(void);            // frame pool slots for the compiled mode

@@ -5,9 +5,9 @@
  * On the DK the onboard MX25R64 flash is cut off these pins (SB10-SB15 open, SB20-SB25
  * shorted). Quad (0xEB read 1-4-4 with 6 wait cycles, 0x38 write 1-4-4) and single line
  * (0x0B / 0x02) both work, but on the DK's jumper wires quad reads break off when all four
- * data lines go high at once (2026-10-14, src/hw_test.c), so the default is single line at
+ * data lines go high at once (2026-10-14, src/hw_test.c), so the DK default is single line at
  * 48 MHz in 32 B bursts: CE# low ~6.5 us, under tCEM (8 us for the 3 V part, measured on the
- * pin). Polled, no interrupt; psramWrite / psramRead hold a mutex (main + ring sender thread). Boot check: psramCheckStart() below.
+ * pin); the V3 board defaults to quad (below). Polled, no interrupt; psramWrite / psramRead hold a mutex (main + ring sender thread). Boot check: psramCheckStart() below.
  */
 #ifndef PSRAM_H_
 #define PSRAM_H_
@@ -18,9 +18,19 @@
 
 #define PSRAM_SIZE  (8u * 1024 * 1024)
 #define PSRAM_PAGE  1024u  // bursts never cross a page
+#ifdef BOARD_V3
+/* V3 board (balsamic3, hub #92): the PSRAM is on the PCB, quad passes 8-96 MHz with 0 errors on both
+ * boards (hub #83 B1, HW_TEST [5d] / [5e] / 8 MB). Same 48 MHz clock as the DK's single line (half the
+ * fastest passing 96 MHz) in 64 B bursts: CE# low ~3.6 us, under half of tCEM 8 us ([5f] checks the
+ * worst case); 128 B would be ~7.2 us, too close. */
+#define PSRAM_DEFAULT_QUAD  true
+#define PSRAM_DEFAULT_MHZ   48
+#define PSRAM_DEFAULT_BURST 64u
+#else
 #define PSRAM_DEFAULT_QUAD  false
 #define PSRAM_DEFAULT_MHZ   48
 #define PSRAM_DEFAULT_BURST 32u  // bytes per CE# low (power of two <= PSRAM_PAGE)
+#endif
 
 typedef struct {
   bool quad;         // false: 0x0B fast read / 0x02 write on one line

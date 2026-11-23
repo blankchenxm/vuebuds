@@ -7,6 +7,7 @@
 #include "nrf_log.h"
 
 #include "ble.h"
+#include "camera.h"
 #include "image.h"
 #include "psram.h"
 #include "ring.h"
@@ -266,8 +267,9 @@ typedef struct __packed {
   uint32_t overwritten;
   uint8_t psram;
   uint8_t synced;
+  uint8_t camera;  // CAMERA_STATE_* (hub #92, added at the end: old hosts read the first 51 bytes)
 } status_t;
-BUILD_ASSERT(sizeof(status_t) == 51, "R_STATUS content is 51 bytes (INTERFACES C2)");
+BUILD_ASSERT(sizeof(status_t) == 52, "R_STATUS content is 52 bytes (INTERFACES C2)");
 
 typedef struct __packed {
   uint8_t reason;
@@ -320,10 +322,11 @@ static void sendStatus(void)
   uint64_t now;
   s.synced = bridgeNow(&now);
   s.now_us = now;
+  s.camera = cameraState();
   bleSendReply(R_STATUS, &s, sizeof(s));
   NRF_LOG_RAW_INFO("%08d [ringcmd] R_STATUS: state %u, period %u, %u frames (%u..%u), %u/%u KB, skipped %u, "
-                   "overwritten %u, psram %u, synced %u\n", systemTimeGetMs(), s.state, s.period, s.frames, s.oldest_seq,
-                   s.newest_seq, s.used_kb, s.total_kb, s.skipped, s.overwritten, s.psram, s.synced);
+                   "overwritten %u, psram %u, synced %u, camera %u\n", systemTimeGetMs(), s.state, s.period, s.frames, s.oldest_seq,
+                   s.newest_seq, s.used_kb, s.total_kb, s.skipped, s.overwritten, s.psram, s.synced, s.camera);
 }
 
 static void sendNone(uint8_t reason)

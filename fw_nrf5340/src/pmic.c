@@ -1,8 +1,8 @@
 /*
  * MAX77650 on the V3 board (pmic.h). Register addresses and the SBB2 code come from
  * fw_v3_test/src/main.c (MAX77650/51 programmer's guide; SBB2 verified on V3 2026-10). The other
- * rails' voltages are decoded with the datasheet's step sizes for the log only (not verified on
- * the board yet: compare with a meter on TP25 / TP27 / TP28 in hub #83 B1).
+ * rails' voltages are decoded with the datasheet's step sizes; the LDO step is confirmed by its OTP
+ * default (0x28 = 1.85 V read back on V3, hub #83). Not metered (Xiaomeng: register read-back only).
  */
 #ifdef BOARD_V3
 
@@ -27,6 +27,7 @@
 #define REG_CNFG_LDO_B  0x39
 
 #define TV_SBB2_2V8 0x28
+#define TV_LDO_1V8  0x24  // 1.35 V + 36 x 12.5 mV; OTP default 0x28 = 1.85 V (read back on both V3 boards, hub #83)
 
 static const struct device *const i2c = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 
@@ -55,6 +56,18 @@ bool pmicInit(void)
     return false;
   }
 
+  // Then the LDO (+1V8: nRF VDD, PSRAM, camera IOVDD, J-Link VTref) from 1.85 V down to 1.8 V
+  // (board.yaml "fw sets 1.8V"; hub #92). Lower only, inside every load's range (PSRAM 1.62-1.98 V,
+  // nRF 1.7-3.6 V). Bit 7 is kept as read.
+  uint8_t ldoBoot = 0;
+  err = rd(REG_CNFG_LDO_A, &ldoBoot);
+  if (!err) {
+    err = i2c_reg_write_byte(i2c, PMIC_I2C_ADDR, REG_CNFG_LDO_A, (ldoBoot & 0x80) | TV_LDO_1V8);
+  }
+  if (err) {
+    printk("[pmic] LDO not set (%d)\n", err);
+  }
+
   uint8_t stat = 0, cid = 0, glbl = 0, erc = 0, chgB = 0, s0a = 0, s0b = 0, s1a = 0, s1b = 0, s2b = 0, la = 0, lb = 0;
   err = rd(REG_STAT_GLBL, &stat) | rd(REG_CID, &cid) | rd(REG_CNFG_GLBL, &glbl) | rd(REG_ERCFLAG, &erc) |
         rd(REG_STAT_CHG_B, &chgB) | rd(REG_CNFG_SBB0_A, &s0a) | rd(REG_CNFG_SBB0_B, &s0b) | rd(REG_CNFG_SBB1_A, &s1a) |
@@ -66,11 +79,13 @@ bool pmicInit(void)
          (stat & 0x02) ? "high" : "low", cid & 0x0f, glbl, erc, chgB, (chgB >> 2) & 3, err ? " (some reads failed)" : "");
   printk("[pmic] +2V8 SBB2 0x%02x -> 0x%02x: %u -> %u mV (B 0x%02x); measure TP26, expect ~2.80 V\n", sbb2Boot, sbb2,
          800 + 50 * (sbb2Boot & 0x3f), 800 + 50 * (sbb2 & 0x3f), s2b);
+  printk("[pmic] +1V8 LDO 0x%02x -> 0x%02x: %u -> %u mV (B 0x%02x)\n", ldoBoot, la, 1350 + (125 * (ldoBoot & 0x7f)) / 10,
+         1350 + (125 * (la & 0x7f)) / 10, lb);
   printk("[pmic] +1V8 LDO 0x%02x ~%u mV (B 0x%02x), +1V2 SBB1 0x%02x ~%u mV (B 0x%02x), VSBB0 0x%02x ~%u mV (B 0x%02x); "
          "datasheet steps, not yet checked against TP25 / TP27 / TP28\n",
          la, 1350 + (125 * (la & 0x7f)) / 10, lb, s1a, 800 + (125 * (s1a & 0x3f)) / 10, s1b, s0a, 800 + 25 * (s0a & 0x3f),
          s0b);
-  return didm == 0 && (sbb2 & 0x3f) == TV_SBB2_2V8;
+  return didm == 0 && (sbb2 & 0x3f) == TV_SBB2_2V8 && (la & 0x7f) == TV_LDO_1V8;
 }
 
 #endif /* BOARD_V3 */

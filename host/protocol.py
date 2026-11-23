@@ -154,7 +154,8 @@ R_NONE_REASONS = {0: "overwritten", 1: "not taken yet", 2: "ring empty", 3: "bus
                   5: "not synced"}
 STATUS_FIELDS = ("state", "period", "format", "quality", "frames", "oldest_seq", "oldest_us", "newest_seq",
                  "newest_us", "now_us", "used_kb", "total_kb", "skipped", "overwritten", "psram", "synced")
-STATUS = struct.Struct("<BHBBHIQIQQHHHIBB")
+STATUS = struct.Struct("<BHBBHIQIQQHHHIBB")  # 51 bytes; firmware from hub #92 on adds one byte:
+CAMERA_STATES = {0: "unchecked", 1: "present", 2: "missing"}  # R_STATUS "camera" (INTERFACES C2); None: old firmware
 R_FRAME_S = struct.Struct("<IQI")    # frame number, capture time, length
 R_NONE_S = struct.Struct("<BQQ")     # reason, oldest time, newest time
 FRAME_HEADER = struct.Struct("<HH")  # width, height (v1)
@@ -213,7 +214,9 @@ def parse_reply(payload: bytes, now: float) -> Optional[Reply]:
     kind, body = payload[0], payload[1:]
     try:
         if kind == R_STATUS:
-            return Reply(kind, dict(zip(STATUS_FIELDS, STATUS.unpack_from(body))), now)
+            f = dict(zip(STATUS_FIELDS, STATUS.unpack_from(body)))
+            f["camera"] = body[STATUS.size] if len(body) > STATUS.size else None
+            return Reply(kind, f, now)
         if kind == R_FRAME:
             return Reply(kind, dict(zip(("seq", "capture_us", "length"), R_FRAME_S.unpack_from(body))), now)
         if kind == R_NONE:

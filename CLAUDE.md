@@ -63,6 +63,8 @@
     引脚和开发板相同(`kicad-agent-flow/boards/balsamic3/board.yaml`);开机先把 PMIC SBB2(相机 AVDD)从 3.3 V 调到 2.8 V(`src/pmic.c`,沿用 `fw_v3_test`),
     再探测相机,没接就打 `[camera] no camera`;没相机时 `0xB8 1/2` 立刻停、`R_STATUS` 状态 0。**开发板的编译结果不含 V3 代码**。
     外接 J-Link 用 1 MHz(`host/protocol.py` 的 `swd_khz`)。上板步骤:`host/v3_bringup.py b0 … b4`。
+    hub #92(Xiaomeng 11-22):**V3 上 PSRAM 默认四线 48 MHz、64 B 一段**(开发板仍单线 48 MHz / 32 B);PMIC LDO(+1V8)1.85 → 1.8 V;
+    `R_STATUS` 末尾加相机字节(0 还没检测 / 1 在 / 2 没找到,INTERFACES C2,52 字节)。两块 V3 的网络核出厂有读保护,第一次要 `west flash --recover`。
 
 ## 仓库结构
 

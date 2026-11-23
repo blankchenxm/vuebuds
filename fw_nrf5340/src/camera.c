@@ -52,6 +52,7 @@
 static void applyPendingExposure(void);  // set before the sensor started (cameraSetExposure)
 
 static bool cameraInitialized = false;
+static uint8_t m_state = CAMERA_STATE_UNCHECKED;  // cameraState()
 static const camera_sensor_t *sensor = NULL;
 static camera_mode_info_t modeInfo;
 
@@ -84,9 +85,11 @@ void cameraInit(void)
   cameraHardwareReset();
 
   if (camera_sensor_detect(&sensor, CAMERA_DETECT_TIMEOUT_MS) != NRF_SUCCESS) {
+    m_state = CAMERA_STATE_MISSING;
     capture_mclk_enable(false);
     return;
   }
+  m_state = CAMERA_STATE_PRESENT;
 
   if (sensor->get_mode_info(CAMERA_MODE, &modeInfo) != NRF_SUCCESS) {
     // e.g. VGA on an HM01B0 (no such mode): leave the camera off.
@@ -192,12 +195,19 @@ uint16_t cameraProbe(void)
   if (err) {
     NRF_LOG_RAW_INFO("[camera] no camera: nothing answers at 0x%02x (%d); pictures and the ring stay off\n",
                      CAMERA_I2C_ADDR, err);
+    m_state = CAMERA_STATE_MISSING;
     return 0;
   }
+  m_state = CAMERA_STATE_PRESENT;
   NRF_LOG_RAW_INFO("[camera] found model 0x%04x, silicon revision 0x%02x (0x0003: 0x%02x)\n", model, id[2], id[3]);
   return model;
 }
 #endif
+
+uint8_t cameraState(void)
+{
+  return m_state;
+}
 
 uint16_t cameraModelId(void)
 {
