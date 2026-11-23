@@ -213,13 +213,19 @@ def test1(ss, period):
     sts = [r.fields if r else None for r in ss.ask(P.ring_command(period), (P.R_STATUS,))]
     row(f"0xB8 2 {period}", sts, {**common, "state": lambda s: s["state"] == 2, "period": lambda s: s["period"] == period})
     time.sleep(6.5)
+    n_lo = int(6500 // period) - 2  # frames expected after 6.5 s: 4-7 at 1 s (the first one at once)
     now = ss.bridge_now()
-    sts = ss.status()
+    replies = ss.ask(P.status_command(), (P.R_STATUS,))
+    sts = [r.fields if r else None for r in replies]
+    # now_us is taken when the reply is built: with VGA the main thread may finish storing a frame first
+    # (up to ~1 s, hub #104), so it must fall between sending and receiving, not at the send time.
+    got = max((r.received_at for r in replies if r), default=time.monotonic())
+    now_rx = int(got * 1e6 + ss.clock[0])
     row("0xB9 after 6.5 s", sts, {
-        **common, "frames": lambda s: 4 <= s["frames"] <= 7, "camera_present": lambda s: s.get("camera") == 1,
+        **common, "frames": lambda s: n_lo <= s["frames"] <= n_lo + 3, "camera_present": lambda s: s.get("camera") == 1,
         "spacing": lambda s: abs((s["newest_us"] - s["oldest_us"]) - (s["frames"] - 1) * period * 1000) < period * 500,
         "phase": lambda s: phase_of(s["newest_us"], period) < 300,
-        "now": lambda s: abs(s["now_us"] - now) < 100_000,
+        "now": lambda s: now - 100_000 < s["now_us"] < now_rx + 100_000,
         "fresh": lambda s: 0 < s["now_us"] - s["newest_us"] < period * 1000 + 400_000,
         "numbers": lambda s: s["newest_seq"] - s["oldest_seq"] + 1 == s["frames"],
         "used": lambda s: 0 < s["used_kb"] < s["frames"] * 40,
@@ -231,12 +237,12 @@ def test1(ss, period):
     p2 = period // 2
     sts = [r.fields if r else None for r in ss.ask(P.ring_command(p2), (P.R_STATUS,))]
     row(f"0xB8 2 {p2} (new period)", sts, {**common, "state": lambda s: s["state"] == 2, "period": lambda s: s["period"] == p2,
-                                          "kept": lambda s: s["frames"] >= 4})
+                                          "kept": lambda s: s["frames"] >= n_lo})
     before = sts
     time.sleep(3.2)
     sts = ss.status()
     row(f"0xB9 after 3.2 s", sts, {
-        **common, "more": lambda s: s["frames"] >= 9,
+        **common, "more": lambda s: s["frames"] >= n_lo + int(3200 // p2) - 1,
         "phase": lambda s: phase_of(s["newest_us"], p2) < 300})
     for b, s0 in zip(ss.boards, before):
         if s0:
